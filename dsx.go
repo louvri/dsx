@@ -24,9 +24,11 @@ package dsx
 import (
 	"context"
 	"errors"
+	"fmt"
 	"log"
 
 	"cloud.google.com/go/datastore"
+	"cloud.google.com/go/datastore/apiv1/datastorepb"
 	"google.golang.org/api/iterator"
 	"google.golang.org/api/option"
 )
@@ -361,6 +363,34 @@ func (qb *QueryBuilder[T]) WithAncestorKey(ancestorKey *datastore.Key) *QueryBui
 func (qb *QueryBuilder[T]) KeysOnly() *QueryBuilder[T] {
 	qb.query = qb.query.KeysOnly()
 	return qb
+}
+
+// Total returns the count of entities matching the current query filters.
+// It uses Datastore's aggregation query to efficiently count without loading entities into memory.
+//
+// Example:
+//
+//	count, err := dsx.From[User](ctx, db).
+//		Where("Status", "=", "active").
+//		Total()
+//
+// Returns 0 and an error if the aggregation query fails or the count result is missing.
+// Note: Datastore count aggregations have a default limit of approximately 1 million entities.
+func (qb *QueryBuilder[T]) Total() (int64, error) {
+	aggQuery := qb.query.NewAggregationQuery().WithCount("total")
+	results, err := qb.db.client.RunAggregationQuery(qb.context, aggQuery)
+	if err != nil {
+		return 0, err
+	}
+	count, ok := results["total"]
+	if !ok {
+		return 0, errors.New("count result not found")
+	}
+	val, ok := count.(*datastorepb.Value)
+	if !ok {
+		return 0, fmt.Errorf("unexpected count type: %T", count)
+	}
+	return val.GetIntegerValue(), nil
 }
 
 // SelectWithCursor executes the query and returns results with a cursor
