@@ -365,18 +365,18 @@ func (qb *QueryBuilder[T]) KeysOnly() *QueryBuilder[T] {
 	return qb
 }
 
-// Total returns the count of entities matching the current query filters.
+// Count returns the count of entities matching the current query filters.
 // It uses Datastore's aggregation query to efficiently count without loading entities into memory.
 //
 // Example:
 //
 //	count, err := dsx.From[User](ctx, db).
 //		Where("Status", "=", "active").
-//		Total()
+//		Count()
 //
 // Returns 0 and an error if the aggregation query fails or the count result is missing.
 // Note: Datastore count aggregations have a default limit of approximately 1 million entities.
-func (qb *QueryBuilder[T]) Total() (int64, error) {
+func (qb *QueryBuilder[T]) Count() (int64, error) {
 	aggQuery := qb.query.NewAggregationQuery().WithCount("total")
 	results, err := qb.db.client.RunAggregationQuery(qb.context, aggQuery)
 	if err != nil {
