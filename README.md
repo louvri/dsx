@@ -9,6 +9,7 @@ A type-safe, generic wrapper for Google Cloud Datastore in Go. Provides a fluent
 - **Pagination support** - Both offset and cursor-based pagination
 - **Batch operations** - Efficient multi-entity upsert and delete
 - **Filter operators** - Type-safe enum for query operators
+- **Aggregation queries** - Efficient count operations without loading entities
 
 ## Installation
 ```bash
@@ -145,6 +146,22 @@ if user == nil {
     // Not found
 }
 ```
+
+### Counting Entities
+
+Use `Count()` to efficiently count entities matching a query without loading them into memory.
+
+```go
+// Count all users
+total, err := dsx.Query[User](db, ctx, "User").Count()
+
+// Count with filters
+activeCount, err := dsx.Query[User](db, ctx, "User").
+    WithFilter("Status", dsx.OpEqual, "active").
+    Count()
+```
+
+> **Note:** Datastore count aggregations have a default limit of approximately 1 million entities.
 
 ### Pagination
 
@@ -306,6 +323,20 @@ user, err := dsx.Query[User](db, ctx, "User").
 user, err := dsx.Query[User](db, ctx, "User").
     WithFilter("Email", dsx.OpEqual, "john@example.com").
     Get()
+```
+
+### Use Count() Instead of Loading Entities
+```go
+// Good - uses aggregation query, no data loaded
+count, err := dsx.Query[User](db, ctx, "User").
+    WithFilter("Status", dsx.OpEqual, "active").
+    Count()
+
+// Bad - loads all entities just to count them
+users, err := dsx.Query[User](db, ctx, "User").
+    WithFilter("Status", dsx.OpEqual, "active").
+    Select()
+count := len(users)
 ```
 
 ### Use Cursors for Deep Pagination
