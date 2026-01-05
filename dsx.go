@@ -131,6 +131,54 @@ func (db *DB) Client() *datastore.Client {
 	return db.client
 }
 
+// GetMulti retrieves multiple entities by their string IDs in a single batch operation.
+// This is more efficient than calling Get multiple times.
+//
+// Entities that don't exist will be zero-valued in the result slice.
+// The result slice maintains the same order as the input keys.
+//
+// Parameters:
+//   - db: Database connection
+//   - ctx: Context for the operation
+//   - kind: Entity kind (table name)
+//   - keys: Slice of string IDs to retrieve
+//
+// Example:
+//
+//	users, err := dsx.GetMulti[User](db, ctx, "User", []string{"user-1", "user-2", "user-3"})
+func GetMulti[T any](db *DB, ctx context.Context, kind string, keys []string) ([]T, error) {
+	if len(keys) == 0 {
+		return []T{}, nil
+	}
+
+	nameKeys := make([]*datastore.Key, 0, len(keys))
+	for _, key := range keys {
+		nameKey := datastore.NameKey(kind, key, nil)
+		nameKeys = append(nameKeys, nameKey)
+	}
+
+	result := make([]T, len(keys))
+	err := db.Client().GetMulti(ctx, nameKeys, result)
+	if err != nil {
+		// MultiError means some entities weren't found, but others may have succeeded
+		var me datastore.MultiError
+		if errors.As(err, &me) {
+			for _, e := range me {
+				if e != nil && !errors.Is(e, datastore.ErrNoSuchEntity) {
+					log.Println("datastore", "get-multi", kind, "error", err)
+					return nil, err
+				}
+			}
+			// All errors were just "no such entity", return partial results
+			return result, nil
+		}
+		log.Println("datastore", "get-multi", kind, "error", err)
+		return nil, err
+	}
+
+	return result, nil
+}
+
 // Query creates a new QueryBuilder for the specified entity kind.
 // The type parameter T specifies the Go struct type that entities will be
 // unmarshaled into.
