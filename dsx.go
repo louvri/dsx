@@ -586,6 +586,39 @@ func (qb *QueryBuilder[T]) Upsert(id string, data *T) error {
 	return nil
 }
 
+// InsertWithAutoID inserts a new entity with an auto-generated numeric ID and returns the complete key.
+// This always creates a new entity since Datastore assigns a unique ID.
+//
+// Use this when you don't need to control the entity's key but need to know
+// the generated ID after insertion (e.g., for returning the ID to a client or logging).
+//
+// Parameters:
+//   - data: Pointer to the entity data
+//
+// Returns the complete key with the generated ID, or an error if insertion fails.
+//
+// Example:
+//
+//	order := Order{
+//	    CustomerID: "cust-123",
+//	    Total:      99.99,
+//	    CreatedAt:  time.Now(),
+//	}
+//	key, err := dsx.Query[Order](db, ctx, "Order").InsertWithAutoID(&order)
+//	if err != nil {
+//	    return err
+//	}
+//	fmt.Printf("Created order with ID: %d\n", key.ID)
+func (qb *QueryBuilder[T]) InsertWithAutoID(data *T) (*datastore.Key, error) {
+	key := datastore.IncompleteKey(qb.kind, nil)
+	completeKey, err := qb.db.client.Put(qb.context, key, data)
+	if err != nil {
+		log.Println("datastore", qb.kind, "insert-with-auto-id-error", err)
+		return nil, err
+	}
+	return completeKey, nil
+}
+
 // UpsertMulti inserts or updates multiple entities in a single batch operation.
 // This is more efficient than calling Upsert multiple times.
 //
