@@ -7,22 +7,26 @@ A type-safe, generic wrapper for Google Cloud Datastore in Go. Provides a fluent
 - **Type-safe generics** - Compile-time type checking for all operations
 - **Fluent API** - Chainable methods for building queries
 - **Pagination support** - Both offset and cursor-based pagination
-- **Batch operations** - Efficient multi-entity upsert and delete
+- **Batch operations** - Efficient multi-entity get, upsert, and delete
 - **Filter operators** - Type-safe enum for query operators
 - **Aggregation queries** - Efficient count operations without loading entities
+- **Auto-generated IDs** - Insert entities with Datastore-assigned IDs
 
 ## Installation
+
 ```bash
 go get github.com/yourusername/dsx
 ```
 
 ## Quick Start
+
 ```go
 package main
 
 import (
     "context"
     "log"
+    "time"
 
     "github.com/yourusername/dsx"
 )
@@ -62,6 +66,7 @@ func main() {
 ## API Reference
 
 ### Connecting
+
 ```go
 // Using default credentials (GOOGLE_APPLICATION_CREDENTIALS)
 db, err := dsx.Connect(ctx, "project-id", "", "")
@@ -76,11 +81,13 @@ db, err := dsx.Connect(ctx, "project-id", "", credentialsJSON)
 ### Querying
 
 #### Basic Select
+
 ```go
 users, err := dsx.Query[User](db, ctx, "User").Select()
 ```
 
 #### With Filters
+
 ```go
 // Single filter
 users, err := dsx.Query[User](db, ctx, "User").
@@ -117,6 +124,7 @@ users, err := dsx.Query[User](db, ctx, "User").
 | `dsx.OpNotIn` | Not in list |
 
 #### Ordering
+
 ```go
 // Ascending
 users, err := dsx.Query[User](db, ctx, "User").
@@ -136,6 +144,7 @@ users, err := dsx.Query[User](db, ctx, "User").
 ```
 
 #### Get Single Entity
+
 ```go
 user, err := dsx.Query[User](db, ctx, "User").
     WithFilter("Email", dsx.OpEqual, "john@example.com").
@@ -146,6 +155,14 @@ if user == nil {
     // Not found
 }
 ```
+
+#### Get Multiple Entities by ID
+
+```go
+users, err := dsx.GetMulti[User](db, ctx, "User", []string{"user-1", "user-2", "user-3"})
+```
+
+Entities that don't exist will be zero-valued in the result slice. The result slice maintains the same order as the input keys.
 
 ### Counting Entities
 
@@ -166,6 +183,7 @@ activeCount, err := dsx.Query[User](db, ctx, "User").
 ### Pagination
 
 #### Offset-based (Simple)
+
 ```go
 // Page 1
 users, err := dsx.Query[User](db, ctx, "User").
@@ -182,6 +200,7 @@ users, err := dsx.Query[User](db, ctx, "User").
 > **Note:** Datastore has a maximum offset of 1000. For deeper pagination, use cursors.
 
 #### Cursor-based (Efficient)
+
 ```go
 // First page
 users, cursor, err := dsx.Query[User](db, ctx, "User").
@@ -218,6 +237,7 @@ for {
 ### Upserting
 
 #### Single Entity
+
 ```go
 user := User{
     Name:      "John Doe",
@@ -230,6 +250,7 @@ err := dsx.Query[User](db, ctx, "User").Upsert("user-123", &user)
 ```
 
 #### Multiple Entities
+
 ```go
 users := map[string]*User{
     "user-1": {Name: "Alice", Email: "alice@example.com", Status: "active"},
@@ -242,7 +263,26 @@ err := dsx.Query[User](db, ctx, "User").UpsertMulti(users)
 
 > **Note:** Datastore limits batch operations to 500 entities.
 
+#### Insert with Auto-generated ID
+
+Use `InsertWithAutoID` when you want Datastore to generate a unique numeric ID and need to know the ID after insertion.
+
+```go
+order := Order{
+    CustomerID: "cust-123",
+    Total:      99.99,
+    CreatedAt:  time.Now(),
+}
+
+key, err := dsx.Query[Order](db, ctx, "Order").InsertWithAutoID(&order)
+if err != nil {
+    return err
+}
+fmt.Printf("Created order with ID: %d\n", key.ID)
+```
+
 ### Deleting
+
 ```go
 // Delete by filter
 err := dsx.Query[User](db, ctx, "User").
@@ -260,6 +300,7 @@ err := dsx.Query[User](db, ctx, "User").
 ### Advanced Features
 
 #### Ancestor Queries
+
 ```go
 companyKey := datastore.NameKey("Company", "acme", nil)
 
@@ -269,6 +310,7 @@ employees, err := dsx.Query[Employee](db, ctx, "Employee").
 ```
 
 #### Distinct Results
+
 ```go
 users, err := dsx.Query[User](db, ctx, "User").
     WithDistinct().
@@ -276,14 +318,15 @@ users, err := dsx.Query[User](db, ctx, "User").
 ```
 
 #### Keys Only
+
 ```go
-// Get keys only (more efficient for counting)
 qb := dsx.Query[User](db, ctx, "User").
     WithFilter("Status", dsx.OpEqual, "active").
     KeysOnly()
 ```
 
 #### Access Underlying Client
+
 ```go
 // For operations not covered by dsx
 client := db.Client()
@@ -292,6 +335,7 @@ client := db.Client()
 ## Indexing
 
 Datastore requires indexes for queries. Simple single-property filters use built-in indexes, but composite queries need explicit indexes in `index.yaml`:
+
 ```yaml
 indexes:
 - kind: User
@@ -302,6 +346,7 @@ indexes:
 ```
 
 This index supports:
+
 ```go
 dsx.Query[User](db, ctx, "User").
     WithFilter("Status", dsx.OpEqual, "active").
@@ -312,6 +357,7 @@ dsx.Query[User](db, ctx, "User").
 ## Best Practices
 
 ### Use Limit with Get()
+
 ```go
 // Good - efficient
 user, err := dsx.Query[User](db, ctx, "User").
@@ -326,6 +372,7 @@ user, err := dsx.Query[User](db, ctx, "User").
 ```
 
 ### Use Count() Instead of Loading Entities
+
 ```go
 // Good - uses aggregation query, no data loaded
 count, err := dsx.Query[User](db, ctx, "User").
@@ -339,7 +386,22 @@ users, err := dsx.Query[User](db, ctx, "User").
 count := len(users)
 ```
 
+### Use GetMulti for Multiple Known IDs
+
+```go
+// Good - single API call
+users, err := dsx.GetMulti[User](db, ctx, "User", []string{"user-1", "user-2", "user-3"})
+
+// Bad - multiple API calls
+for _, id := range ids {
+    user, err := dsx.Query[User](db, ctx, "User").
+        WithFilter(dsx.FieldKey, dsx.OpEqual, id).
+        Get()
+}
+```
+
 ### Use Cursors for Deep Pagination
+
 ```go
 // Good - efficient at any depth
 users, cursor, err := dsx.Query[User](db, ctx, "User").
@@ -355,6 +417,7 @@ users, err := dsx.Query[User](db, ctx, "User").
 ```
 
 ### Batch Operations for Multiple Entities
+
 ```go
 // Good - single API call
 err := dsx.Query[User](db, ctx, "User").UpsertMulti(usersMap)
@@ -368,6 +431,7 @@ for id, user := range usersMap {
 ### Use noindex for Non-Queryable Fields
 
 In your struct, mark fields you don't query to save on index writes:
+
 ```go
 type User struct {
     Name      string
@@ -380,13 +444,17 @@ type User struct {
 ## Error Handling
 
 The package logs errors with context before returning them:
+
 ```
 datastore User select-error <error details>
 datastore User upsert-error <error details>
 datastore User delete get-all error <error details>
+datastore get-multi User error <error details>
+datastore Order insert-with-auto-id-error <error details>
 ```
 
 Common errors:
+
 - **"query defined to use offset instead of cursor"** - Can't use `SelectWithCursor()` after `WithOffset()`
 - **"query defined to use cursor"** - Can't use `Select()` after `WithCursor()`
 
