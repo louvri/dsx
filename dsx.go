@@ -26,12 +26,57 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"sync"
 
 	"cloud.google.com/go/datastore"
 	"cloud.google.com/go/datastore/apiv1/datastorepb"
 	"google.golang.org/api/iterator"
 	"google.golang.org/api/option"
 )
+
+// Logger defines the interface for logging within dsx.
+// Implement this interface to integrate with your application's logging framework.
+// By default, dsx uses the standard library's log package.
+type Logger interface {
+	Println(v ...any)
+	Printf(format string, v ...any)
+}
+
+type defaultLogger struct{}
+
+func (defaultLogger) Println(v ...any) { log.Println(v...) }
+func (defaultLogger) Printf(format string, v ...any) { log.Printf(format, v...) }
+
+// loggerMu protects concurrent access to the package-level logger.
+var loggerMu sync.RWMutex
+
+// logger is the package-level logger instance.
+var logger Logger = defaultLogger{}
+
+// getLogger returns the current logger in a concurrency-safe manner.
+func getLogger() Logger {
+	loggerMu.RLock()
+	l := logger
+	loggerMu.RUnlock()
+	return l
+}
+
+// SetLogger sets a custom logger for the dsx package.
+// Pass nil to reset to the default logger.
+// It is safe to call from multiple goroutines.
+//
+// Example:
+//
+//	dsx.SetLogger(myStructuredLogger)
+func SetLogger(l Logger) {
+	loggerMu.Lock()
+	defer loggerMu.Unlock()
+	if l == nil {
+		logger = defaultLogger{}
+		return
+	}
+	logger = l
+}
 
 type (
 	// DB represents a connection to a Google Cloud Datastore database.
@@ -79,12 +124,14 @@ const (
 	// OpNotIn filters for non-membership in a list (not in)
 	// Value must be a slice
 	OpNotIn FilterOperator = "not in"
+	// OpNotEqual filters for inequality (!=)
+	OpNotEqual FilterOperator = "!="
 
 	// FieldKey is a special field name used to filter by entity key.
-	// When used with WithFilter, the value should be the string ID of the entity.
+	// When used with WithFilter, the value should be the entity's key name.
 	//
 	// Example:
-	//   WithFilter(dsx.FieldKey, dsx.OpEqual, "entity-id")
+	//   WithFilter(dsx.FieldKey, dsx.OpEqual, "entity-key")
 	FieldKey string = "__key__"
 )
 
@@ -105,14 +152,18 @@ const (
 //
 //	// Using explicit credentials
 //	db, err := dsx.Connect(ctx, "my-project", "my-db", credJSON)
-func Connect(ctx context.Context, projectId, databaseId, credentialsJSON string) (result *DB, err error) {
+func Connect(ctx context.Context, projectId, databaseId, credentialsJSON string) (*DB, error) {
 	var client *datastore.Client
+	var err error
 	if credentialsJSON != "" {
 		client, err = datastore.NewClientWithDatabase(ctx, projectId, databaseId, option.WithCredentialsJSON([]byte(credentialsJSON)))
 	} else {
 		client, err = datastore.NewClientWithDatabase(ctx, projectId, databaseId)
 	}
-	return &DB{client: client, projectId: projectId, databaseId: databaseId}, err
+	if err != nil {
+		return nil, err
+	}
+	return &DB{client: client, projectId: projectId, databaseId: databaseId}, nil
 }
 
 // ProjectId returns the Google Cloud project ID for this connection.
@@ -131,7 +182,13 @@ func (db *DB) Client() *datastore.Client {
 	return db.client
 }
 
-// GetMulti retrieves multiple entities by their string IDs in a single batch operation.
+// Close releases the resources held by the database connection.
+// It should be called when the DB is no longer needed.
+func (db *DB) Close() error {
+	return db.client.Close()
+}
+
+// GetMulti retrieves multiple entities by their string keys in a single batch operation.
 // This is more efficient than calling Get multiple times.
 //
 // Entities that don't exist will be zero-valued in the result slice.
@@ -141,7 +198,7 @@ func (db *DB) Client() *datastore.Client {
 //   - db: Database connection
 //   - ctx: Context for the operation
 //   - kind: Entity kind (table name)
-//   - keys: Slice of string IDs to retrieve
+//   - keys: Slice of string key names to retrieve
 //
 // Example:
 //
@@ -165,14 +222,14 @@ func GetMulti[T any](db *DB, ctx context.Context, kind string, keys []string) ([
 		if errors.As(err, &me) {
 			for _, e := range me {
 				if e != nil && !errors.Is(e, datastore.ErrNoSuchEntity) {
-					log.Println("datastore", "get-multi", kind, "error", err)
+					getLogger().Println("datastore", "get-multi", kind, "error", err)
 					return nil, err
 				}
 			}
 			// All errors were just "no such entity", return partial results
 			return result, nil
 		}
-		log.Println("datastore", "get-multi", kind, "error", err)
+		getLogger().Println("datastore", "get-multi", kind, "error", err)
 		return nil, err
 	}
 
@@ -326,10 +383,12 @@ func (qb *QueryBuilder[T]) WithOrderDesc(field string) *QueryBuilder[T] {
 func (qb *QueryBuilder[T]) WithCursor(cursor string) *QueryBuilder[T] {
 	if cursor != "" {
 		c, err := datastore.DecodeCursor(cursor)
-		if err == nil {
-			qb.query = qb.query.Start(c)
-			qb.usingCursor = true
+		if err != nil {
+			getLogger().Println("datastore", qb.kind, "cursor-decode-error", err)
+			return qb
 		}
+		qb.query = qb.query.Start(c)
+		qb.usingCursor = true
 	}
 	return qb
 }
@@ -337,7 +396,7 @@ func (qb *QueryBuilder[T]) WithCursor(cursor string) *QueryBuilder[T] {
 // WithFilter adds a filter condition to the query.
 // Can be called multiple times to add multiple filters (AND logic).
 //
-// When filtering by FieldKey ("__key__"), pass the string ID as the value;
+// When filtering by FieldKey ("__key__"), pass the entity's key name as the value;
 // it will be automatically converted to a datastore.Key.
 //
 // Parameters:
@@ -369,10 +428,15 @@ func (qb *QueryBuilder[T]) WithCursor(cursor string) *QueryBuilder[T] {
 //	users, err := dsx.Query[User](db, ctx, "User").
 //	    WithFilter("Status", dsx.OpIn, []string{"active", "pending"}).
 //	    Select()
-func (qb *QueryBuilder[T]) WithFilter(key string, operator FilterOperator, value interface{}) *QueryBuilder[T] {
+func (qb *QueryBuilder[T]) WithFilter(key string, operator FilterOperator, value any) *QueryBuilder[T] {
 	if key == FieldKey {
-		if tmp, ok := value.(string); ok {
-			qb.query = qb.query.FilterField(key, string(operator), datastore.NameKey(qb.kind, tmp, nil))
+		switch v := value.(type) {
+		case string:
+			qb.query = qb.query.FilterField(key, string(operator), datastore.NameKey(qb.kind, v, nil))
+		case *datastore.Key:
+			qb.query = qb.query.FilterField(key, string(operator), v)
+		default:
+			getLogger().Printf("datastore %s filter-error: FieldKey requires string or *datastore.Key value, got %T", qb.kind, value)
 		}
 	} else {
 		qb.query = qb.query.FilterField(key, string(operator), value)
@@ -401,11 +465,28 @@ func (qb *QueryBuilder[T]) WithAncestorKey(ancestorKey *datastore.Key) *QueryBui
 	return qb
 }
 
-// KeysOnly marks the query to return only entity keys, not full entities.
-// This is more efficient when you only need keys (e.g., for counting or
-// batch deletion).
+// WithProject sets the query to return only the specified fields (projection query).
+// This is more efficient when you only need a subset of entity fields, as it
+// avoids loading the full entity.
 //
-// Note: After calling KeysOnly, use SelectKeys instead of Select.
+// Note: Projected fields must be indexed. Properties with noindex tags cannot be projected.
+//
+// Returns the QueryBuilder for method chaining.
+//
+// Example:
+//
+//	// Only fetch Name and Email fields
+//	users, err := dsx.Query[User](db, ctx, "User").
+//	    WithProject("Name", "Email").
+//	    Select()
+func (qb *QueryBuilder[T]) WithProject(fields ...string) *QueryBuilder[T] {
+	qb.query = qb.query.Project(fields...)
+	return qb
+}
+
+// KeysOnly marks the query to return only entity keys, not full entities.
+// This is more efficient when you only need keys (e.g., for batch deletion).
+// Used internally by Delete.
 //
 // Returns the QueryBuilder for method chaining.
 func (qb *QueryBuilder[T]) KeysOnly() *QueryBuilder[T] {
@@ -418,8 +499,8 @@ func (qb *QueryBuilder[T]) KeysOnly() *QueryBuilder[T] {
 //
 // Example:
 //
-//	count, err := dsx.From[User](ctx, db).
-//		Where("Status", "=", "active").
+//	count, err := dsx.Query[User](db, ctx, "User").
+//		WithFilter("Status", dsx.OpEqual, "active").
 //		Count()
 //
 // Returns 0 and an error if the aggregation query fails or the count result is missing.
@@ -485,7 +566,7 @@ func (qb *QueryBuilder[T]) SelectWithCursor() ([]T, string, error) {
 			break
 		}
 		if err != nil {
-			log.Println("datastore", qb.kind, "select-error", err)
+			getLogger().Println("datastore", qb.kind, "select-error", err)
 			return nil, "", err
 		}
 		result = append(result, entity)
@@ -520,7 +601,7 @@ func (qb *QueryBuilder[T]) Select() ([]T, error) {
 
 	var result []T
 	if _, err := qb.db.client.GetAll(qb.context, qb.query, &result); err != nil {
-		log.Println("datastore", qb.kind, "select-error", err)
+		getLogger().Println("datastore", qb.kind, "select-error", err)
 		return nil, err
 	}
 
@@ -564,38 +645,38 @@ func (qb *QueryBuilder[T]) Get() (*T, error) {
 	return nil, nil
 }
 
-// Upsert inserts or updates a single entity with the specified string ID.
-// If an entity with the ID exists, it is overwritten; otherwise, a new
+// Upsert inserts or updates a single entity with the specified key name.
+// If an entity with the key exists, it is overwritten; otherwise, a new
 // entity is created.
 //
 // Parameters:
-//   - id: String ID for the entity key
+//   - key: String key name for the entity
 //   - data: Pointer to the entity data
 //
 // Example:
 //
 //	user := User{Name: "John", Email: "john@example.com", Status: "active"}
 //	err := dsx.Query[User](db, ctx, "User").Upsert("user-123", &user)
-func (qb *QueryBuilder[T]) Upsert(id string, data *T) error {
-	key := datastore.NameKey(qb.kind, id, nil)
-	if _, err := qb.db.client.Put(qb.context, key, data); err != nil {
-		log.Println("datastore", qb.kind, "upsert-error", err)
+func (qb *QueryBuilder[T]) Upsert(key string, data *T) error {
+	nameKey := datastore.NameKey(qb.kind, key, nil)
+	if _, err := qb.db.client.Put(qb.context, nameKey, data); err != nil {
+		getLogger().Println("datastore", qb.kind, "upsert-error", err)
 		return err
 	}
 
 	return nil
 }
 
-// InsertWithAutoID inserts a new entity with an auto-generated numeric ID and returns the complete key.
-// This always creates a new entity since Datastore assigns a unique ID.
+// InsertWithAutoKey inserts a new entity with an auto-generated key and returns the complete key.
+// This always creates a new entity since Datastore assigns a unique key.
 //
 // Use this when you don't need to control the entity's key but need to know
-// the generated ID after insertion (e.g., for returning the ID to a client or logging).
+// the generated key after insertion (e.g., for returning the key to a client or logging).
 //
 // Parameters:
 //   - data: Pointer to the entity data
 //
-// Returns the complete key with the generated ID, or an error if insertion fails.
+// Returns the complete key, or an error if insertion fails.
 //
 // Example:
 //
@@ -604,16 +685,16 @@ func (qb *QueryBuilder[T]) Upsert(id string, data *T) error {
 //	    Total:      99.99,
 //	    CreatedAt:  time.Now(),
 //	}
-//	key, err := dsx.Query[Order](db, ctx, "Order").InsertWithAutoID(&order)
+//	key, err := dsx.Query[Order](db, ctx, "Order").InsertWithAutoKey(&order)
 //	if err != nil {
 //	    return err
 //	}
-//	fmt.Printf("Created order with ID: %d\n", key.ID)
-func (qb *QueryBuilder[T]) InsertWithAutoID(data *T) (*datastore.Key, error) {
-	key := datastore.IncompleteKey(qb.kind, nil)
-	completeKey, err := qb.db.client.Put(qb.context, key, data)
+//	fmt.Printf("Created order with key ID: %d\n", key.ID)
+func (qb *QueryBuilder[T]) InsertWithAutoKey(data *T) (*datastore.Key, error) {
+	incompleteKey := datastore.IncompleteKey(qb.kind, nil)
+	completeKey, err := qb.db.client.Put(qb.context, incompleteKey, data)
 	if err != nil {
-		log.Println("datastore", qb.kind, "insert-with-auto-id-error", err)
+		getLogger().Println("datastore", qb.kind, "insert-with-auto-key-error", err)
 		return nil, err
 	}
 	return completeKey, nil
@@ -623,7 +704,7 @@ func (qb *QueryBuilder[T]) InsertWithAutoID(data *T) (*datastore.Key, error) {
 // This is more efficient than calling Upsert multiple times.
 //
 // Parameters:
-//   - items: Map of string ID to entity pointer
+//   - items: Map of string key name to entity pointer
 //
 // Note: Datastore has a limit of 500 entities per batch operation.
 // For larger batches, split into multiple calls.
@@ -642,13 +723,13 @@ func (qb *QueryBuilder[T]) UpsertMulti(items map[string]*T) error {
 
 	keys := make([]*datastore.Key, 0, len(items))
 	entities := make([]*T, 0, len(items))
-	for id, data := range items {
-		keys = append(keys, datastore.NameKey(qb.kind, id, nil))
+	for name, data := range items {
+		keys = append(keys, datastore.NameKey(qb.kind, name, nil))
 		entities = append(entities, data)
 	}
 
 	if _, err := qb.db.client.PutMulti(qb.context, keys, entities); err != nil {
-		log.Println("datastore", qb.kind, "upsert-multi-error", err)
+		getLogger().Println("datastore", qb.kind, "upsert-multi-error", err)
 		return err
 	}
 
@@ -672,27 +753,137 @@ func (qb *QueryBuilder[T]) UpsertMulti(items map[string]*T) error {
 //	err := dsx.Query[User](db, ctx, "User").
 //	    WithFilter(dsx.FieldKey, dsx.OpEqual, "user-123").
 //	    Delete()
-func (qb *QueryBuilder[T]) Delete() (err error) {
+func (qb *QueryBuilder[T]) Delete() error {
 	keys, err := qb.db.client.GetAll(qb.context, qb.query.KeysOnly(), nil)
 	if err != nil {
-		log.Println("datastore", qb.kind, "delete", "get-all", "error", err)
+		getLogger().Println("datastore", qb.kind, "delete", "get-all", "error", err)
 		return err
 	}
-	totalKey := len(keys)
-	if totalKey > 0 {
-		for i := 0; i < totalKey; i += 500 {
-			end := i + 500
-			if end > totalKey {
-				end = totalKey
-			}
-
-			batch := keys[i:end]
-			if err = qb.db.client.DeleteMulti(qb.context, batch); err != nil {
-				log.Println("datastore", qb.kind, "delete", "delete-multi", "error", err)
-				return err
-			}
+	for i := 0; i < len(keys); i += 500 {
+		batch := keys[i:min(i+500, len(keys))]
+		if err := qb.db.client.DeleteMulti(qb.context, batch); err != nil {
+			getLogger().Println("datastore", qb.kind, "delete", "delete-multi", "error", err)
+			return err
 		}
 	}
-
 	return nil
+}
+
+// GetByKey retrieves a single entity by its string key name.
+// Returns nil (not an error) if the entity does not exist.
+//
+// Example:
+//
+//	user, err := dsx.GetByKey[User](db, ctx, "User", "user-123")
+//	if user == nil {
+//	    // not found
+//	}
+func GetByKey[T any](db *DB, ctx context.Context, kind string, key string) (*T, error) {
+	nameKey := datastore.NameKey(kind, key, nil)
+	var entity T
+	if err := db.client.Get(ctx, nameKey, &entity); err != nil {
+		if errors.Is(err, datastore.ErrNoSuchEntity) {
+			return nil, nil
+		}
+		getLogger().Println("datastore", kind, "get-by-key", "error", err)
+		return nil, err
+	}
+	return &entity, nil
+}
+
+// DeleteByKey deletes a single entity by its string key name.
+//
+// Example:
+//
+//	err := dsx.DeleteByKey(db, ctx, "User", "user-123")
+func DeleteByKey(db *DB, ctx context.Context, kind string, key string) error {
+	nameKey := datastore.NameKey(kind, key, nil)
+	if err := db.client.Delete(ctx, nameKey); err != nil {
+		getLogger().Println("datastore", kind, "delete-by-key", "error", err)
+		return err
+	}
+	return nil
+}
+
+// InsertMultiWithAutoKey inserts multiple entities with auto-generated keys
+// in a single batch operation. Returns the complete keys.
+//
+// Note: Datastore limits batch operations to 500 entities.
+//
+// Example:
+//
+//	orders := []*Order{
+//	    {CustomerID: "cust-1", Total: 10.00},
+//	    {CustomerID: "cust-2", Total: 20.00},
+//	}
+//	keys, err := dsx.Query[Order](db, ctx, "Order").InsertMultiWithAutoKey(orders)
+func (qb *QueryBuilder[T]) InsertMultiWithAutoKey(entities []*T) ([]*datastore.Key, error) {
+	if len(entities) == 0 {
+		return []*datastore.Key{}, nil
+	}
+
+	keys := make([]*datastore.Key, len(entities))
+	for i := range entities {
+		keys[i] = datastore.IncompleteKey(qb.kind, nil)
+	}
+
+	completeKeys, err := qb.db.client.PutMulti(qb.context, keys, entities)
+	if err != nil {
+		getLogger().Println("datastore", qb.kind, "insert-multi-with-auto-key-error", err)
+		return nil, err
+	}
+	return completeKeys, nil
+}
+
+// DeleteMultiByKey deletes multiple entities by their string key names in a single batch operation.
+// Entities are deleted in batches of 500 (Datastore's limit per operation).
+//
+// Example:
+//
+//	err := dsx.DeleteMultiByKey(db, ctx, "User", []string{"user-1", "user-2", "user-3"})
+func DeleteMultiByKey(db *DB, ctx context.Context, kind string, keys []string) error {
+	if len(keys) == 0 {
+		return nil
+	}
+
+	nameKeys := make([]*datastore.Key, len(keys))
+	for i, key := range keys {
+		nameKeys[i] = datastore.NameKey(kind, key, nil)
+	}
+
+	for i := 0; i < len(nameKeys); i += 500 {
+		batch := nameKeys[i:min(i+500, len(nameKeys))]
+		if err := db.client.DeleteMulti(ctx, batch); err != nil {
+			getLogger().Println("datastore", kind, "delete-multi-by-key", "error", err)
+			return err
+		}
+	}
+	return nil
+}
+
+// RunInTransaction executes the given function within a Datastore transaction.
+// If fn returns nil, the transaction is committed. If fn returns an error,
+// the transaction is rolled back.
+//
+// Datastore transactions are limited to 25 entity groups and have a maximum
+// duration of 270 seconds.
+//
+// Example:
+//
+//	err := dsx.RunInTransaction(db, ctx, func(tx *datastore.Transaction) error {
+//	    var user User
+//	    key := datastore.NameKey("User", "user-123", nil)
+//	    if err := tx.Get(key, &user); err != nil {
+//	        return err
+//	    }
+//	    user.Balance += 100
+//	    _, err := tx.Put(key, &user)
+//	    return err
+//	})
+func RunInTransaction(db *DB, ctx context.Context, fn func(tx *datastore.Transaction) error) error {
+	_, err := db.client.RunInTransaction(ctx, fn)
+	if err != nil {
+		getLogger().Println("datastore", "transaction-error", err)
+	}
+	return err
 }
