@@ -10,12 +10,15 @@ A type-safe, generic wrapper for Google Cloud Datastore in Go. Provides a fluent
 - **Batch operations** - Efficient multi-entity get, upsert, and delete
 - **Filter operators** - Type-safe enum for query operators
 - **Aggregation queries** - Efficient count operations without loading entities
-- **Auto-generated IDs** - Insert entities with Datastore-assigned IDs
+- **Auto-generated keys** - Insert entities with Datastore-assigned keys
+- **Projection queries** - Fetch only specific fields for efficiency
+- **Transaction support** - Atomic multi-entity operations
+- **Configurable logging** - Plug in your own structured logger
 
 ## Installation
 
 ```bash
-go get github.com/yourusername/dsx
+go get github.com/louvri/dsx
 ```
 
 ## Quick Start
@@ -28,7 +31,7 @@ import (
     "log"
     "time"
 
-    "github.com/yourusername/dsx"
+    "github.com/louvri/dsx"
 )
 
 type User struct {
@@ -46,6 +49,7 @@ func main() {
     if err != nil {
         log.Fatal(err)
     }
+    defer db.Close()
 
     // Query users
     users, err := dsx.Query[User](db, ctx, "User").
@@ -76,6 +80,9 @@ db, err := dsx.Connect(ctx, "project-id", "database-id", "")
 
 // Using explicit credentials JSON
 db, err := dsx.Connect(ctx, "project-id", "", credentialsJSON)
+
+// Always close when done
+defer db.Close()
 ```
 
 ### Querying
@@ -122,6 +129,7 @@ users, err := dsx.Query[User](db, ctx, "User").
 | `dsx.OpLessEqual` | Less than or equal (<=) |
 | `dsx.OpIn` | In list |
 | `dsx.OpNotIn` | Not in list |
+| `dsx.OpNotEqual` | Not equal (!=) |
 
 #### Ordering
 
@@ -156,7 +164,16 @@ if user == nil {
 }
 ```
 
-#### Get Multiple Entities by ID
+#### Get Single Entity by Key
+
+```go
+user, err := dsx.GetByKey[User](db, ctx, "User", "user-123")
+if user == nil {
+    // Not found
+}
+```
+
+#### Get Multiple Entities by Key
 
 ```go
 users, err := dsx.GetMulti[User](db, ctx, "User", []string{"user-1", "user-2", "user-3"})
@@ -263,9 +280,9 @@ err := dsx.Query[User](db, ctx, "User").UpsertMulti(users)
 
 > **Note:** Datastore limits batch operations to 500 entities.
 
-#### Insert with Auto-generated ID
+#### Insert with Auto-generated Key
 
-Use `InsertWithAutoID` when you want Datastore to generate a unique numeric ID and need to know the ID after insertion.
+Use `InsertWithAutoKey` when you want Datastore to generate a unique key and need to know it after insertion.
 
 ```go
 order := Order{
@@ -274,24 +291,36 @@ order := Order{
     CreatedAt:  time.Now(),
 }
 
-key, err := dsx.Query[Order](db, ctx, "Order").InsertWithAutoID(&order)
+key, err := dsx.Query[Order](db, ctx, "Order").InsertWithAutoKey(&order)
 if err != nil {
     return err
 }
-fmt.Printf("Created order with ID: %d\n", key.ID)
+fmt.Printf("Created order with key ID: %d\n", key.ID)
+```
+
+#### Batch Insert with Auto-generated Keys
+
+```go
+orders := []*Order{
+    {CustomerID: "cust-1", Total: 10.00},
+    {CustomerID: "cust-2", Total: 20.00},
+}
+
+keys, err := dsx.Query[Order](db, ctx, "Order").InsertMultiWithAutoKey(orders)
 ```
 
 ### Deleting
 
 ```go
+// Delete by key
+err := dsx.DeleteByKey(db, ctx, "User", "user-123")
+
+// Delete multiple by keys
+err := dsx.DeleteMultiByKey(db, ctx, "User", []string{"user-1", "user-2", "user-3"})
+
 // Delete by filter
 err := dsx.Query[User](db, ctx, "User").
     WithFilter("Status", dsx.OpEqual, "inactive").
-    Delete()
-
-// Delete specific entity
-err := dsx.Query[User](db, ctx, "User").
-    WithFilter(dsx.FieldKey, dsx.OpEqual, "user-123").
     Delete()
 ```
 
@@ -307,6 +336,38 @@ companyKey := datastore.NameKey("Company", "acme", nil)
 employees, err := dsx.Query[Employee](db, ctx, "Employee").
     WithAncestorKey(companyKey).
     Select()
+```
+
+#### Projection Queries
+
+```go
+// Only fetch Name and Email fields
+users, err := dsx.Query[User](db, ctx, "User").
+    WithProject("Name", "Email").
+    Select()
+
+// Combine with distinct
+users, err := dsx.Query[User](db, ctx, "User").
+    WithProject("Status").
+    WithDistinct().
+    Select()
+```
+
+> **Note:** Projected fields must be indexed. Properties with `noindex` tags cannot be projected.
+
+#### Transactions
+
+```go
+err := dsx.RunInTransaction(db, ctx, func(tx *datastore.Transaction) error {
+    var user User
+    key := datastore.NameKey("User", "user-123", nil)
+    if err := tx.Get(key, &user); err != nil {
+        return err
+    }
+    user.Balance += 100
+    _, err := tx.Put(key, &user)
+    return err
+})
 ```
 
 #### Distinct Results
@@ -386,16 +447,16 @@ users, err := dsx.Query[User](db, ctx, "User").
 count := len(users)
 ```
 
-### Use GetMulti for Multiple Known IDs
+### Use GetMulti for Multiple Known Keys
 
 ```go
 // Good - single API call
 users, err := dsx.GetMulti[User](db, ctx, "User", []string{"user-1", "user-2", "user-3"})
 
 // Bad - multiple API calls
-for _, id := range ids {
+for _, key := range keys {
     user, err := dsx.Query[User](db, ctx, "User").
-        WithFilter(dsx.FieldKey, dsx.OpEqual, id).
+        WithFilter(dsx.FieldKey, dsx.OpEqual, key).
         Get()
 }
 ```
@@ -423,8 +484,8 @@ users, err := dsx.Query[User](db, ctx, "User").
 err := dsx.Query[User](db, ctx, "User").UpsertMulti(usersMap)
 
 // Bad - multiple API calls
-for id, user := range usersMap {
-    err := dsx.Query[User](db, ctx, "User").Upsert(id, user)
+for key, user := range usersMap {
+    err := dsx.Query[User](db, ctx, "User").Upsert(key, user)
 }
 ```
 
@@ -441,6 +502,25 @@ type User struct {
 }
 ```
 
+## Custom Logging
+
+By default, dsx logs to the standard library's `log` package. You can provide your own logger by implementing the `Logger` interface:
+
+```go
+type Logger interface {
+    Println(v ...any)
+    Printf(format string, v ...any)
+}
+```
+
+```go
+// Use a custom logger
+dsx.SetLogger(myLogger)
+
+// Reset to default
+dsx.SetLogger(nil)
+```
+
 ## Error Handling
 
 The package logs errors with context before returning them:
@@ -450,7 +530,13 @@ datastore User select-error <error details>
 datastore User upsert-error <error details>
 datastore User delete get-all error <error details>
 datastore get-multi User error <error details>
-datastore Order insert-with-auto-id-error <error details>
+datastore Order insert-with-auto-key-error <error details>
+datastore User get-by-key error <error details>
+datastore User delete-by-key error <error details>
+datastore Order insert-multi-with-auto-key-error <error details>
+datastore User cursor-decode-error <error details>
+datastore User delete-multi-by-key error <error details>
+datastore transaction-error <error details>
 ```
 
 Common errors:
