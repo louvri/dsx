@@ -9,13 +9,11 @@ linters:
     - ineffassign
     - gosec
     - gocritic
-
-linters-settings:
-  gosec:
-    excludes:
-      - G115
+  settings:
+    gosec:
+      excludes:
+        - G115
 
 issues:
-  exclude-use-default: false
   max-issues-per-linter: 0
   max-same-issues: 0
