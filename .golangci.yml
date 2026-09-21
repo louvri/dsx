@@ -2,13 +2,26 @@ version: "2"
 
 linters:
   enable:
+    - bodyclose
+    - copyloopvar
+    - durationcheck
     - errcheck
-    - govet
-    - staticcheck
-    - unused
-    - ineffassign
-    - gosec
+    - errorlint
     - gocritic
+    - gosec
+    - govet
+    - ineffassign
+    - makezero
+    - misspell
+    - modernize
+    - nilerr
+    - perfsprint
+    - prealloc
+    - staticcheck
+    - unconvert
+    - unused
+    - usestdlibvars
+    - wastedassign
   settings:
     gosec:
       excludes:

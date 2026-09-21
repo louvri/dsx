@@ -15,31 +15,47 @@ jobs:
         with:
           fetch-depth: 0
 
-      - name: Get latest tag
-        id: latest_tag
+      - name: Determine next version
+        id: version
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          tag=$(git tag --sort=-v:refname | head -n 1)
-          echo "tag=${tag:-v0.0.0}" >> "$GITHUB_OUTPUT"
+          set -euo pipefail
 
-      - name: Bump patch version
-        id: next_tag
-        run: |
-          tag="${{ steps.latest_tag.outputs.tag }}"
-          # Strip leading 'v'
+          tag=$(git tag --sort=-v:refname | head -n 1)
+          tag="${tag:-v0.0.0}"
           version="${tag#v}"
-          major=$(echo "$version" | cut -d. -f1)
-          minor=$(echo "$version" | cut -d. -f2)
-          patch=$(echo "$version" | cut -d. -f3)
-          next_patch=$((patch + 1))
-          next_tag="v${major}.${minor}.${next_patch}"
-          echo "tag=${next_tag}" >> "$GITHUB_OUTPUT"
+          major="${version%%.*}"
+          rest="${version#*.}"
+          minor="${rest%%.*}"
+          patch="${rest#*.}"
+
+          # The bump level is taken from the merged commit message, so a
+          # breaking change never ships as a patch release. Default: patch.
+          message=$(git log -1 --pretty=%B)
+          case "$message" in
+            *"[major]"*) level="major" ;;
+            *"[minor]"*) level="minor" ;;
+            *)           level="patch" ;;
+          esac
+
+          case "$level" in
+            major) major=$((major + 1)); minor=0; patch=0 ;;
+            minor) minor=$((minor + 1)); patch=0 ;;
+            patch) patch=$((patch + 1)) ;;
+          esac
+
+          next="v${major}.${minor}.${patch}"
+          echo "Bumping ${tag} -> ${next} (${level})"
+          echo "tag=${next}" >> "$GITHUB_OUTPUT"
 
       - name: Create tag and release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          git tag "${{ steps.next_tag.outputs.tag }}"
-          git push origin "${{ steps.next_tag.outputs.tag }}"
-          gh release create "${{ steps.next_tag.outputs.tag }}" \
+          set -euo pipefail
+          git tag "${{ steps.version.outputs.tag }}"
+          git push origin "${{ steps.version.outputs.tag }}"
+          gh release create "${{ steps.version.outputs.tag }}" \
             --generate-notes \
-            --title "${{ steps.next_tag.outputs.tag }}"
+            --title "${{ steps.version.outputs.tag }}"

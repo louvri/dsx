@@ -23,6 +23,12 @@ jobs:
       - name: Vet
         run: go vet ./...
 
+      - name: Test
+        run: go test -race -coverprofile=coverage.out ./...
+
+      - name: Coverage
+        run: go tool cover -func=coverage.out
+
       - name: Lint
         uses: golangci/golangci-lint-action@v7
         with:
