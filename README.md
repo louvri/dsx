@@ -6,14 +6,17 @@ A type-safe, generic wrapper for Google Cloud Datastore in Go. Provides a fluent
 
 - **Type-safe generics** - Compile-time type checking for all operations
 - **Fluent API** - Chainable methods for building queries
+- **Explicit contexts** - Every call that performs I/O takes its own `context.Context`
+- **Honest not-found** - Lookups report `ErrNotFound` instead of a nil entity
+- **Namespaces** - Multi-tenant partitioning per connection or per query
+- **Automatic batching** - Batch reads, writes and deletes are chunked to Datastore's limits
+- **Streaming deletes** - Query-based delete uses constant memory regardless of match count
 - **Pagination support** - Both offset and cursor-based pagination
-- **Batch operations** - Efficient multi-entity get, upsert, and delete
 - **Filter operators** - Type-safe enum for query operators
 - **Aggregation queries** - Efficient count operations without loading entities
 - **Auto-generated keys** - Insert entities with Datastore-assigned keys
 - **Projection queries** - Fetch only specific fields for efficiency
 - **Transaction support** - Atomic multi-entity operations
-- **Configurable logging** - Plug in your own structured logger
 
 ## Installation
 
@@ -28,6 +31,7 @@ package main
 
 import (
     "context"
+    "errors"
     "log"
     "time"
 
@@ -45,18 +49,18 @@ func main() {
     ctx := context.Background()
 
     // Connect to Datastore
-    db, err := dsx.Connect(ctx, "my-project", "", "")
+    db, err := dsx.Connect(ctx, "my-project", "")
     if err != nil {
         log.Fatal(err)
     }
     defer db.Close()
 
     // Query users
-    users, err := dsx.Query[User](db, ctx, "User").
+    users, err := dsx.Query[User](db, "User").
         WithFilter("Status", dsx.OpEqual, "active").
         WithOrderDesc("CreatedAt").
         WithLimit(10).
-        Select()
+        Select(ctx)
     if err != nil {
         log.Fatal(err)
     }
@@ -64,8 +68,46 @@ func main() {
     for _, user := range users {
         log.Printf("User: %s (%s)", user.Name, user.Email)
     }
+
+    // Look one up
+    user, err := dsx.GetByKey[User](ctx, db, "User", "user-123")
+    switch {
+    case errors.Is(err, dsx.ErrNotFound):
+        log.Println("no such user")
+    case err != nil:
+        log.Fatal(err)
+    default:
+        log.Printf("found %s", user.Name)
+    }
 }
 ```
+
+## Migrating from v0.0.x to v0.1.0
+
+v0.1.0 is a breaking release. The changes are mechanical and the compiler finds all of them except the `ErrNotFound` one, which is listed first because it is the only change that compiles cleanly and behaves differently.
+
+| Before | After | Why |
+| --- | --- | --- |
+| `user, err := ...Get()`; `if user == nil` | `if errors.Is(err, dsx.ErrNotFound)` | A missing entity was indistinguishable from a successful empty result, so every caller had to remember a nil check. `Get` and `GetByKey` now return `ErrNotFound`. |
+| `dsx.Query[User](db, ctx, "User")` | `dsx.Query[User](db, "User")` | The context belongs to the call that does the I/O, not to the builder. |
+| `.Select()` / `.Get()` / `.Count()` | `.Select(ctx)` / `.Get(ctx)` / `.Count(ctx)` | |
+| `.Upsert(key, &u)` | `.Upsert(ctx, key, &u)` | |
+| `.UpsertMulti(m)` / `.Delete()` | `.UpsertMulti(ctx, m)` / `.Delete(ctx)` | |
+| `.InsertWithAutoKey(&u)` | `.InsertWithAutoKey(ctx, &u)` | |
+| `.InsertMultiWithAutoKey(s)` | `.InsertMultiWithAutoKey(ctx, s)` | |
+| `dsx.GetMulti[User](db, ctx, ...)` | `dsx.GetMulti[User](ctx, db, ...)` | Context first, as Go convention requires. |
+| `dsx.GetByKey[User](db, ctx, ...)` | `dsx.GetByKey[User](ctx, db, ...)` | |
+| `dsx.DeleteByKey(db, ctx, ...)` | `dsx.DeleteByKey(ctx, db, ...)` | |
+| `dsx.DeleteMultiByKey(db, ctx, ...)` | `dsx.DeleteMultiByKey(ctx, db, ...)` | |
+| `dsx.RunInTransaction(db, ctx, fn)` | `dsx.RunInTransaction(ctx, db, fn)` | |
+| `dsx.Connect(ctx, project, database, credJSON)` | `dsx.Connect(ctx, project, database, dsx.WithCredentialsJSON(credJSON))` | Options leave room for namespaces and client settings without another signature change. |
+| `dsx.SetLogger(l)`, `dsx.Logger` | *(removed)* | A library should not log. Errors are wrapped with the operation and kind, so the caller logs them once, with its own logger and fields. |
+| `errors.New("query defined to use cursor")` | `dsx.ErrPaginationConflict` | Comparable with `errors.Is`. |
+
+Two fixes need no migration but change behavior:
+
+- **`OpIn` and `OpNotIn` now accept any slice.** `WithFilter("Status", dsx.OpIn, []string{"active", "pending"})` was documented but rejected by Datastore, which only accepts `[]any`. dsx now converts the slice for you.
+- **Batch operations chunk automatically.** `UpsertMulti`, `InsertMultiWithAutoKey` and `GetMulti` previously sent everything in one request and failed above Datastore's limits. Each now splits into requests of 500 (writes) or 1000 (reads).
 
 ## API Reference
 
@@ -73,225 +115,211 @@ func main() {
 
 ```go
 // Using default credentials (GOOGLE_APPLICATION_CREDENTIALS)
-db, err := dsx.Connect(ctx, "project-id", "", "")
+db, err := dsx.Connect(ctx, "project-id", "")
 
-// Using specific database
-db, err := dsx.Connect(ctx, "project-id", "database-id", "")
+// Using a specific database
+db, err := dsx.Connect(ctx, "project-id", "database-id")
 
 // Using explicit credentials JSON
-db, err := dsx.Connect(ctx, "project-id", "", credentialsJSON)
+db, err := dsx.Connect(ctx, "project-id", "", dsx.WithCredentialsJSON(credentialsJSON))
+
+// Scoped to a namespace, with an extra client option
+db, err := dsx.Connect(ctx, "project-id", "",
+    dsx.WithNamespace("tenant-42"),
+    dsx.WithClientOptions(option.WithEndpoint("localhost:8081")))
 
 // Always close when done
 defer db.Close()
 ```
+
+### Namespaces
+
+Datastore namespaces partition data inside one database, which is the usual way to isolate tenants. A namespace can be set for the whole connection, derived per request, or overridden for a single query.
+
+```go
+// Per connection
+db, err := dsx.Connect(ctx, "project-id", "", dsx.WithNamespace("tenant-42"))
+
+// Per request - shares the underlying client, so this is free
+tenant := db.WithNamespace(tenantIDFromRequest)
+user, err := dsx.GetByKey[User](ctx, tenant, "User", "user-123")
+
+// Per query
+users, err := dsx.Query[User](db, "User").
+    WithNamespace("tenant-42").
+    Select(ctx)
+```
+
+The namespace applies to queries *and* to the keys the builder writes, deletes or filters on. `WithNamespace` may appear anywhere in the chain. An empty namespace means the default namespace.
+
+`db.WithNamespace` returns a copy that shares the underlying client, so it must not be closed separately - closing any copy closes the connection for all of them.
+
+Keys you build yourself, including inside a transaction, keep the namespace you give them; `db.Namespace()` reports the one in effect.
 
 ### Querying
 
 #### Basic Select
 
 ```go
-users, err := dsx.Query[User](db, ctx, "User").Select()
+users, err := dsx.Query[User](db, "User").Select(ctx)
 ```
 
 #### With Filters
 
 ```go
 // Single filter
-users, err := dsx.Query[User](db, ctx, "User").
+users, err := dsx.Query[User](db, "User").
     WithFilter("Status", dsx.OpEqual, "active").
-    Select()
+    Select(ctx)
 
-// Multiple filters (AND logic)
-users, err := dsx.Query[User](db, ctx, "User").
+// Multiple filters (AND)
+users, err := dsx.Query[User](db, "User").
     WithFilter("Status", dsx.OpEqual, "active").
     WithFilter("Age", dsx.OpGreaterEqual, 18).
-    Select()
+    Select(ctx)
 
-// IN filter
-users, err := dsx.Query[User](db, ctx, "User").
+// Membership - any slice type works
+users, err := dsx.Query[User](db, "User").
     WithFilter("Status", dsx.OpIn, []string{"active", "pending"}).
-    Select()
+    Select(ctx)
 
-// Filter by entity key
-users, err := dsx.Query[User](db, ctx, "User").
+// Filter by key
+users, err := dsx.Query[User](db, "User").
     WithFilter(dsx.FieldKey, dsx.OpEqual, "user-123").
-    Select()
+    Select(ctx)
+
+// Several keys at once
+users, err := dsx.Query[User](db, "User").
+    WithFilter(dsx.FieldKey, dsx.OpIn, []string{"user-1", "user-2"}).
+    Select(ctx)
 ```
 
 #### Available Filter Operators
 
-| Operator | Description |
-|----------|-------------|
-| `dsx.OpEqual` | Equal (=) |
-| `dsx.OpGreater` | Greater than (>) |
-| `dsx.OpGreaterEqual` | Greater than or equal (>=) |
-| `dsx.OpLess` | Less than (<) |
-| `dsx.OpLessEqual` | Less than or equal (<=) |
-| `dsx.OpIn` | In list |
-| `dsx.OpNotIn` | Not in list |
-| `dsx.OpNotEqual` | Not equal (!=) |
+| Operator | Datastore | Meaning |
+| --- | --- | --- |
+| `dsx.OpEqual` | `=` | Equal |
+| `dsx.OpNotEqual` | `!=` | Not equal |
+| `dsx.OpGreater` | `>` | Greater than |
+| `dsx.OpGreaterEqual` | `>=` | Greater than or equal |
+| `dsx.OpLess` | `<` | Less than |
+| `dsx.OpLessEqual` | `<=` | Less than or equal |
+| `dsx.OpIn` | `in` | Member of a slice |
+| `dsx.OpNotIn` | `not in` | Not a member of a slice |
 
 #### Ordering
 
 ```go
-// Ascending
-users, err := dsx.Query[User](db, ctx, "User").
-    WithOrder("Name").
-    Select()
-
-// Descending
-users, err := dsx.Query[User](db, ctx, "User").
-    WithOrderDesc("CreatedAt").
-    Select()
-
-// Multiple orders
-users, err := dsx.Query[User](db, ctx, "User").
-    WithOrder("Status").
-    WithOrderDesc("CreatedAt").
-    Select()
+users, err := dsx.Query[User](db, "User").
+    WithOrder("Status").          // ascending
+    WithOrderDesc("CreatedAt").   // descending
+    Select(ctx)
 ```
 
 #### Get Single Entity
 
 ```go
-user, err := dsx.Query[User](db, ctx, "User").
+user, err := dsx.Query[User](db, "User").
     WithFilter("Email", dsx.OpEqual, "john@example.com").
-    WithLimit(1).
-    Get()
-
-if user == nil {
-    // Not found
+    Get(ctx)
+if errors.Is(err, dsx.ErrNotFound) {
+    // no such user
 }
 ```
+
+`Get` limits the query to one entity for you; there is no need to add `WithLimit(1)`.
 
 #### Get Single Entity by Key
 
 ```go
-user, err := dsx.GetByKey[User](db, ctx, "User", "user-123")
-if user == nil {
-    // Not found
+user, err := dsx.GetByKey[User](ctx, db, "User", "user-123")
+if errors.Is(err, dsx.ErrNotFound) {
+    // no such user
 }
 ```
 
 #### Get Multiple Entities by Key
 
 ```go
-users, err := dsx.GetMulti[User](db, ctx, "User", []string{"user-1", "user-2", "user-3"})
+users, err := dsx.GetMulti[User](ctx, db, "User", []string{"user-1", "user-2", "user-3"})
 ```
 
-Entities that don't exist will be zero-valued in the result slice. The result slice maintains the same order as the input keys.
+The result keeps the order of the requested keys, and requests are split into chunks of 1000 automatically. Entities that do not exist are left **zero-valued** rather than reported, so use `GetByKey` when you need to tell a missing entity from an empty one.
 
 ### Counting Entities
 
-Use `Count()` to efficiently count entities matching a query without loading them into memory.
-
 ```go
-// Count all users
-total, err := dsx.Query[User](db, ctx, "User").Count()
-
-// Count with filters
-activeCount, err := dsx.Query[User](db, ctx, "User").
+count, err := dsx.Query[User](db, "User").
     WithFilter("Status", dsx.OpEqual, "active").
-    Count()
+    Count(ctx)
 ```
 
-> **Note:** Datastore count aggregations have a default limit of approximately 1 million entities.
+Uses an aggregation query, so no entities are loaded. Datastore's count aggregation is limited to roughly one million entities.
 
 ### Pagination
 
 #### Offset-based (Simple)
 
 ```go
-// Page 1
-users, err := dsx.Query[User](db, ctx, "User").
-    WithLimit(50).
-    Select()
-
-// Page 2
-users, err := dsx.Query[User](db, ctx, "User").
-    WithLimit(50).
-    WithOffset(50).
-    Select()
+users, err := dsx.Query[User](db, "User").
+    WithOffset(20).
+    WithLimit(10).
+    Select(ctx)
 ```
 
-> **Note:** Datastore has a maximum offset of 1000. For deeper pagination, use cursors.
+Datastore caps offsets at 1000 and still scans everything it skips. Use cursors beyond the first few pages.
 
 #### Cursor-based (Efficient)
 
 ```go
-// First page
-users, cursor, err := dsx.Query[User](db, ctx, "User").
-    WithLimit(50).
-    SelectWithCursor()
-
-// Next page
-users, cursor, err = dsx.Query[User](db, ctx, "User").
-    WithLimit(50).
-    WithCursor(cursor).
-    SelectWithCursor()
-
-// Iterate through all pages
 cursor := ""
 for {
-    users, nextCursor, err := dsx.Query[User](db, ctx, "User").
+    users, nextCursor, err := dsx.Query[User](db, "User").
         WithFilter("Status", dsx.OpEqual, "active").
         WithLimit(100).
         WithCursor(cursor).
-        SelectWithCursor()
+        SelectWithCursor(ctx)
     if err != nil {
         return err
     }
 
-    // Process users...
+    process(users)
 
     if len(users) < 100 {
-        break // Last page
+        break // last page
     }
     cursor = nextCursor
 }
 ```
+
+Offset and cursor pagination cannot be combined. Mixing them yields `dsx.ErrPaginationConflict`.
 
 ### Upserting
 
 #### Single Entity
 
 ```go
-user := User{
-    Name:      "John Doe",
-    Email:     "john@example.com",
-    Status:    "active",
-    CreatedAt: time.Now(),
-}
-
-err := dsx.Query[User](db, ctx, "User").Upsert("user-123", &user)
+user := User{Name: "John", Email: "john@example.com", Status: "active"}
+err := dsx.Query[User](db, "User").Upsert(ctx, "user-123", &user)
 ```
 
 #### Multiple Entities
 
 ```go
 users := map[string]*User{
-    "user-1": {Name: "Alice", Email: "alice@example.com", Status: "active"},
-    "user-2": {Name: "Bob", Email: "bob@example.com", Status: "active"},
-    "user-3": {Name: "Charlie", Email: "charlie@example.com", Status: "pending"},
+    "user-1": {Name: "Alice", Status: "active"},
+    "user-2": {Name: "Bob", Status: "active"},
 }
-
-err := dsx.Query[User](db, ctx, "User").UpsertMulti(users)
+err := dsx.Query[User](db, "User").UpsertMulti(ctx, users)
 ```
 
-> **Note:** Datastore limits batch operations to 500 entities.
+Split into commits of 500 automatically. Each commit is independent, so a failure part-way through leaves the batches before it applied.
 
 #### Insert with Auto-generated Key
 
-Use `InsertWithAutoKey` when you want Datastore to generate a unique key and need to know it after insertion.
-
 ```go
-order := Order{
-    CustomerID: "cust-123",
-    Total:      99.99,
-    CreatedAt:  time.Now(),
-}
-
-key, err := dsx.Query[Order](db, ctx, "Order").InsertWithAutoKey(&order)
+order := Order{CustomerID: "cust-123", Total: 99.99, CreatedAt: time.Now()}
+key, err := dsx.Query[Order](db, "Order").InsertWithAutoKey(ctx, &order)
 if err != nil {
     return err
 }
@@ -305,26 +333,29 @@ orders := []*Order{
     {CustomerID: "cust-1", Total: 10.00},
     {CustomerID: "cust-2", Total: 20.00},
 }
-
-keys, err := dsx.Query[Order](db, ctx, "Order").InsertMultiWithAutoKey(orders)
+keys, err := dsx.Query[Order](db, "Order").InsertMultiWithAutoKey(ctx, orders)
 ```
+
+Returns the complete keys in input order, committing in batches of 500.
 
 ### Deleting
 
 ```go
-// Delete by key
-err := dsx.DeleteByKey(db, ctx, "User", "user-123")
-
-// Delete multiple by keys
-err := dsx.DeleteMultiByKey(db, ctx, "User", []string{"user-1", "user-2", "user-3"})
-
-// Delete by filter
-err := dsx.Query[User](db, ctx, "User").
+// Delete everything matching a query
+err := dsx.Query[User](db, "User").
     WithFilter("Status", dsx.OpEqual, "inactive").
-    Delete()
+    Delete(ctx)
+
+// Delete one entity by key
+err := dsx.DeleteByKey(ctx, db, "User", "user-123")
+
+// Delete many entities by key
+err := dsx.DeleteMultiByKey(ctx, db, "User", []string{"user-1", "user-2"})
 ```
 
-> **Warning:** Calling `Delete()` without filters will delete ALL entities of that kind.
+Query-based `Delete` streams keys from a keys-only query and deletes them in batches of 500, so memory stays constant no matter how many entities match.
+
+**Warning:** `Delete` without filters removes every entity of the kind.
 
 ### Advanced Features
 
@@ -332,35 +363,29 @@ err := dsx.Query[User](db, ctx, "User").
 
 ```go
 companyKey := datastore.NameKey("Company", "acme", nil)
-
-employees, err := dsx.Query[Employee](db, ctx, "Employee").
+employees, err := dsx.Query[Employee](db, "Employee").
     WithAncestorKey(companyKey).
-    Select()
+    Select(ctx)
 ```
 
 #### Projection Queries
 
 ```go
-// Only fetch Name and Email fields
-users, err := dsx.Query[User](db, ctx, "User").
+users, err := dsx.Query[User](db, "User").
     WithProject("Name", "Email").
-    Select()
-
-// Combine with distinct
-users, err := dsx.Query[User](db, ctx, "User").
-    WithProject("Status").
-    WithDistinct().
-    Select()
+    Select(ctx)
 ```
 
-> **Note:** Projected fields must be indexed. Properties with `noindex` tags cannot be projected.
+Projected fields must be indexed; fields tagged `noindex` cannot be projected.
 
 #### Transactions
 
 ```go
-err := dsx.RunInTransaction(db, ctx, func(tx *datastore.Transaction) error {
-    var user User
+err := dsx.RunInTransaction(ctx, db, func(tx *datastore.Transaction) error {
     key := datastore.NameKey("User", "user-123", nil)
+    key.Namespace = db.Namespace()
+
+    var user User
     if err := tx.Get(key, &user); err != nil {
         return err
     }
@@ -370,26 +395,26 @@ err := dsx.RunInTransaction(db, ctx, func(tx *datastore.Transaction) error {
 })
 ```
 
+Datastore transactions are limited to 25 entity groups and 270 seconds.
+
 #### Distinct Results
 
 ```go
-users, err := dsx.Query[User](db, ctx, "User").
+users, err := dsx.Query[User](db, "User").
+    WithProject("Status").
     WithDistinct().
-    Select()
+    Select(ctx)
 ```
 
 #### Keys Only
 
 ```go
-qb := dsx.Query[User](db, ctx, "User").
-    WithFilter("Status", dsx.OpEqual, "active").
-    KeysOnly()
+users, err := dsx.Query[User](db, "User").KeysOnly().Select(ctx)
 ```
 
 #### Access Underlying Client
 
 ```go
-// For operations not covered by dsx
 client := db.Client()
 ```
 
@@ -409,55 +434,38 @@ indexes:
 This index supports:
 
 ```go
-dsx.Query[User](db, ctx, "User").
+dsx.Query[User](db, "User").
     WithFilter("Status", dsx.OpEqual, "active").
     WithOrderDesc("CreatedAt").
-    Select()
+    Select(ctx)
 ```
 
 ## Best Practices
 
-### Use Limit with Get()
-
-```go
-// Good - efficient
-user, err := dsx.Query[User](db, ctx, "User").
-    WithFilter("Email", dsx.OpEqual, "john@example.com").
-    WithLimit(1).
-    Get()
-
-// Works but fetches all matches first
-user, err := dsx.Query[User](db, ctx, "User").
-    WithFilter("Email", dsx.OpEqual, "john@example.com").
-    Get()
-```
-
 ### Use Count() Instead of Loading Entities
 
 ```go
-// Good - uses aggregation query, no data loaded
-count, err := dsx.Query[User](db, ctx, "User").
+// Good - uses an aggregation query, no data loaded
+count, err := dsx.Query[User](db, "User").
     WithFilter("Status", dsx.OpEqual, "active").
-    Count()
+    Count(ctx)
 
 // Bad - loads all entities just to count them
-users, err := dsx.Query[User](db, ctx, "User").
+users, err := dsx.Query[User](db, "User").
     WithFilter("Status", dsx.OpEqual, "active").
-    Select()
+    Select(ctx)
 count := len(users)
 ```
 
 ### Use GetMulti for Multiple Known Keys
 
 ```go
-// Good - single API call
-users, err := dsx.GetMulti[User](db, ctx, "User", []string{"user-1", "user-2", "user-3"})
+// Good - batched lookups
+users, err := dsx.GetMulti[User](ctx, db, "User", []string{"user-1", "user-2", "user-3"})
 
-// Bad - multiple API calls
+// Bad - one round trip per key
 for _, key := range keys {
-    user, err := dsx.Query[User](db, ctx, "User").
-        WithFilter(dsx.FieldKey, dsx.OpEqual, key).
-        Get()
+    user, err := dsx.GetByKey[User](ctx, db, "User", key)
 }
 ```
 
@@ -465,27 +473,27 @@ for _, key := range keys {
 
 ```go
 // Good - efficient at any depth
-users, cursor, err := dsx.Query[User](db, ctx, "User").
+users, cursor, err := dsx.Query[User](db, "User").
     WithLimit(50).
     WithCursor(cursor).
-    SelectWithCursor()
+    SelectWithCursor(ctx)
 
-// Bad - expensive for large offsets, max 1000
-users, err := dsx.Query[User](db, ctx, "User").
+// Bad - expensive for large offsets, and Datastore caps them at 1000
+users, err := dsx.Query[User](db, "User").
     WithLimit(50).
-    WithOffset(5000). // This will fail!
-    Select()
+    WithOffset(5000).
+    Select(ctx)
 ```
 
 ### Batch Operations for Multiple Entities
 
 ```go
-// Good - single API call
-err := dsx.Query[User](db, ctx, "User").UpsertMulti(usersMap)
+// Good - batched commits
+err := dsx.Query[User](db, "User").UpsertMulti(ctx, usersMap)
 
-// Bad - multiple API calls
+// Bad - one round trip per entity
 for key, user := range usersMap {
-    err := dsx.Query[User](db, ctx, "User").Upsert(key, user)
+    err := dsx.Query[User](db, "User").Upsert(ctx, key, user)
 }
 ```
 
@@ -502,48 +510,49 @@ type User struct {
 }
 ```
 
-## Custom Logging
+## Error Handling
 
-By default, dsx logs to the standard library's `log` package. You can provide your own logger by implementing the `Logger` interface:
+dsx does not log. Every error is wrapped with the operation and kind that produced it and returned to the caller, so your own logger reports it once, with your own fields:
+
+```
+dsx: select User: rpc error: code = PermissionDenied ...
+dsx: upsert User/user-123: rpc error: ...
+dsx: get-multi User [1000:2000]: rpc error: ...
+dsx: delete User: scan keys: rpc error: ...
+```
+
+The underlying error is preserved, so `errors.Is` and `errors.As` still reach the Datastore and gRPC error values beneath.
+
+### Sentinel errors
+
+| Error | Returned by | Meaning |
+| --- | --- | --- |
+| `dsx.ErrNotFound` | `Get`, `GetByKey` | No entity matched |
+| `dsx.ErrPaginationConflict` | any terminal call | Offset and cursor pagination were combined |
 
 ```go
-type Logger interface {
-    Println(v ...any)
-    Printf(format string, v ...any)
+user, err := dsx.GetByKey[User](ctx, db, "User", "user-123")
+switch {
+case errors.Is(err, dsx.ErrNotFound):
+    return handleMissing()
+case err != nil:
+    return fmt.Errorf("load user: %w", err)
 }
 ```
 
+### Deferred build errors
+
+Builder methods never return an error. The first problem found while building the query - an undecodable cursor, a key filter given the wrong type, offset combined with a cursor - is recorded and returned by the terminal call, so a chain stays readable:
+
 ```go
-// Use a custom logger
-dsx.SetLogger(myLogger)
-
-// Reset to default
-dsx.SetLogger(nil)
+users, err := dsx.Query[User](db, "User").
+    WithFilter(dsx.FieldKey, dsx.OpEqual, "user-123").
+    WithCursor(cursor).
+    SelectWithCursor(ctx)
 ```
 
-## Error Handling
-
-The package logs errors with context before returning them:
-
-```
-datastore User select-error <error details>
-datastore User upsert-error <error details>
-datastore User delete get-all error <error details>
-datastore get-multi User error <error details>
-datastore Order insert-with-auto-key-error <error details>
-datastore User get-by-key error <error details>
-datastore User delete-by-key error <error details>
-datastore Order insert-multi-with-auto-key-error <error details>
-datastore User cursor-decode-error <error details>
-datastore User delete-multi-by-key error <error details>
-datastore transaction-error <error details>
-```
-
-Common errors:
-
-- **"query defined to use offset instead of cursor"** - Can't use `SelectWithCursor()` after `WithOffset()`
-- **"query defined to use cursor"** - Can't use `Select()` after `WithCursor()`
+`QueryBuilder.Err()` exposes the same error earlier if you want to check before executing.
 
 ## License
 
-MIT License - see LICENSE file for details.
+MIT
