@@ -49,6 +49,7 @@ fi
 # match on the Release-As trailer below.
 subjects=$(git log "$range" --pretty=%s | tr -d '\r')
 messages=$(git log "$range" --pretty=%B | tr -d '\r')
+tip=$(git log -1 --pretty=%B | tr -d '\r')
 
 # A squash merge collapses the branch into one commit whose body
 # lists the original subjects as "* subject", so read those as
@@ -84,10 +85,23 @@ elif grep -qE '^Release-As:[[:space:]]*minor[[:space:]]*$' <<< "$messages"; then
   level="minor"
 elif grep -qE '^Release-As:[[:space:]]*patch[[:space:]]*$' <<< "$messages"; then
   level="patch"
+elif grep -qE '^Release-As:[[:space:]]*skip[[:space:]]*$' <<< "$tip"; then
+  # Nothing here reaches a consumer - a workflow change, a README edit - so
+  # publishing a version identical to the last one would be noise.
+  #
+  # Read from the TIP commit only, unlike every other level. Skipping creates
+  # no tag, so a skip found anywhere in the range would still be in the range
+  # on the next push, and every release after it would skip too - one skip
+  # would disable releases permanently. Reading the commit that was just
+  # pushed makes a skip defer rather than suppress: the next push releases
+  # normally and carries the skipped commits with it.
+  echo "Release-As: skip; nothing to release." >&2
+  echo "skip"
+  exit 0
 elif grep -qE '^Release-As:' <<< "$messages"; then
   # Present but unreadable: say so rather than fall through to the commit
   # subject, which would silently produce a different version.
-  echo "Release-As: trailer found but its level is not major, minor or patch; ignoring it." >&2
+  echo "Release-As: trailer found but its level is not major, minor, patch or skip; ignoring it." >&2
 fi
 
 if [ -z "$level" ]; then

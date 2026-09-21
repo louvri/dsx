@@ -618,7 +618,15 @@ To set the level explicitly, add a `Release-As:` trailer on its own line in the 
 Release-As: minor
 ```
 
-An explicit trailer always wins, and has to be a whole line, so prose that merely mentions a level cannot trigger a release. Surrounding whitespace is fine; a trailer whose level is not one of the three logs a warning and is ignored. If several commits in the range carry different trailers, the highest level is used.
+A change that reaches no consumer - a workflow, a README - can skip the release entirely:
+
+```
+Release-As: skip
+```
+
+An explicit trailer always wins, and has to be a whole line, so prose that merely mentions a level cannot trigger a release. Surrounding whitespace is fine; a trailer whose level is not one of the four logs a warning and is ignored.
+
+`skip` is read from the merged commit only, unlike the three release levels which are read from every commit since the last tag. Skipping creates no tag, so a skip found anywhere in the range would still be there on the next push and would disable releases permanently. Reading only the commit that was merged makes a skip **defer** rather than suppress: the next release goes out normally and carries the skipped commits with it. If several commits in the range carry different trailers, the highest level is used.
 
 ## License
 
