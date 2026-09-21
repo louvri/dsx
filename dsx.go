@@ -32,6 +32,7 @@ import (
 	"errors"
 	"fmt"
 	"reflect"
+	"slices"
 
 	"cloud.google.com/go/datastore"
 	"cloud.google.com/go/datastore/apiv1/datastorepb"
@@ -66,6 +67,11 @@ const (
 	// maxLookupSize is the maximum number of keys Datastore accepts in a single
 	// lookup.
 	maxLookupSize = 1000
+
+	// maxPrealloc caps how much of a caller's limit is allocated before any
+	// result arrives, since a limit often comes straight from a request
+	// parameter and need not reflect how many entities exist.
+	maxPrealloc = 1024
 )
 
 type (
@@ -145,9 +151,9 @@ const (
 	// OpIn filters for membership in a list (in)
 	// Value must be a slice, e.g., []string{"a", "b", "c"}
 	OpIn FilterOperator = "in"
-	// OpNotIn filters for non-membership in a list (not in)
+	// OpNotIn filters for non-membership in a list (not-in)
 	// Value must be a slice
-	OpNotIn FilterOperator = "not in"
+	OpNotIn FilterOperator = "not-in"
 	// OpNotEqual filters for inequality (!=)
 	OpNotEqual FilterOperator = "!="
 
@@ -453,12 +459,29 @@ func membershipValues(value any) ([]any, error) {
 	return elements, nil
 }
 
+// valid reports whether the operator is one dsx defines. An unknown operator
+// would otherwise be rejected inside the Datastore client, which Count does not
+// surface - the filter would be dropped and the count taken over more rows.
+func (o FilterOperator) valid() bool {
+	switch o {
+	case OpEqual, OpNotEqual, OpGreater, OpGreaterEqual, OpLess, OpLessEqual, OpIn, OpNotIn:
+		return true
+	}
+	return false
+}
+
 // keyRefOf records how a key filter value should later become a key.
 func keyRefOf(value any) (keyRef, error) {
 	switch typed := value.(type) {
 	case string:
+		if typed == "" {
+			return keyRef{}, errors.New("key name must not be empty")
+		}
 		return keyRef{name: typed}, nil
 	case *datastore.Key:
+		if typed == nil {
+			return keyRef{}, errors.New("key must not be nil")
+		}
 		return keyRef{key: typed}, nil
 	default:
 		return keyRef{}, fmt.Errorf("value must be a string or *datastore.Key, got %T", value)
@@ -658,6 +681,10 @@ func (qb *QueryBuilder[T]) WithCursor(cursor string) *QueryBuilder[T] {
 //	    WithFilter("Status", dsx.OpIn, []string{"active", "pending"}).
 //	    Select(ctx)
 func (qb *QueryBuilder[T]) WithFilter(field string, operator FilterOperator, value any) *QueryBuilder[T] {
+	if !operator.valid() {
+		return qb.fail(fmt.Errorf("dsx: %s: unknown filter operator %q on %s", qb.kind, operator, field))
+	}
+
 	membership := operator == OpIn || operator == OpNotIn
 
 	var elements []any
@@ -700,6 +727,13 @@ func (qb *QueryBuilder[T]) WithFilter(field string, operator FilterOperator, val
 //
 // A nil ancestor key is ignored.
 //
+// The ancestor key is used exactly as given, including its namespace. On a
+// namespaced connection, build it in the same namespace - Datastore rejects a
+// query whose ancestor sits in a different partition:
+//
+//	companyKey := datastore.NameKey("Company", "acme", nil)
+//	companyKey.Namespace = db.Namespace()
+//
 // Returns the QueryBuilder for method chaining.
 //
 // Example:
@@ -731,15 +765,6 @@ func (qb *QueryBuilder[T]) WithAncestorKey(ancestorKey *datastore.Key) *QueryBui
 //	    Select(ctx)
 func (qb *QueryBuilder[T]) WithProject(fields ...string) *QueryBuilder[T] {
 	qb.query = qb.query.Project(fields...)
-	return qb
-}
-
-// KeysOnly marks the query to return only entity keys, not full entities.
-// This is more efficient when you only need keys.
-//
-// Returns the QueryBuilder for method chaining.
-func (qb *QueryBuilder[T]) KeysOnly() *QueryBuilder[T] {
-	qb.query = qb.query.KeysOnly()
 	return qb
 }
 
@@ -814,7 +839,7 @@ func (qb *QueryBuilder[T]) SelectWithCursor(ctx context.Context) ([]T, string, e
 		return nil, "", ErrPaginationConflict
 	}
 
-	result := make([]T, 0, qb.limit)
+	result := make([]T, 0, min(qb.limit, maxPrealloc))
 	it := qb.db.client.Run(ctx, query)
 	for {
 		var entity T
@@ -864,6 +889,35 @@ func (qb *QueryBuilder[T]) Select(ctx context.Context) ([]T, error) {
 	}
 
 	return result, nil
+}
+
+// SelectKeys executes the query and returns only the keys of the matching
+// entities, without loading the entities themselves. It is the cheap way to
+// find out which entities match - for an existence check, to hand the keys to
+// [RunInTransaction], or to count identifiers you then look up selectively.
+//
+// Returns [ErrPaginationConflict] if the query was configured with WithCursor.
+//
+// Example:
+//
+//	keys, err := dsx.Query[User](db, "User").
+//	    WithFilter("Status", dsx.OpEqual, "inactive").
+//	    SelectKeys(ctx)
+func (qb *QueryBuilder[T]) SelectKeys(ctx context.Context) ([]*datastore.Key, error) {
+	query, err := qb.build()
+	if err != nil {
+		return nil, err
+	}
+	if qb.usingCursor {
+		return nil, ErrPaginationConflict
+	}
+
+	keys, err := qb.db.client.GetAll(ctx, query.KeysOnly(), nil)
+	if err != nil {
+		return nil, fmt.Errorf("dsx: select-keys %s: %w", qb.kind, err)
+	}
+
+	return keys, nil
 }
 
 // Get executes the query and returns the first matching entity.
@@ -970,7 +1024,9 @@ func (qb *QueryBuilder[T]) InsertWithAutoKey(ctx context.Context, data *T) (*dat
 //   - items: Map of string key name to entity pointer
 //
 // Note: each batch is committed independently, so a failure part-way through a
-// large write leaves the batches before it applied.
+// large write leaves the batches before it applied. Keys are written in sorted
+// order, so batch boundaries and the keys named by an error are stable across
+// runs; the error names the first and last key of the batch that failed.
 //
 // Example:
 //
@@ -987,17 +1043,25 @@ func (qb *QueryBuilder[T]) UpsertMulti(ctx context.Context, items map[string]*T)
 		return nil
 	}
 
-	keys := make([]*datastore.Key, 0, len(items))
-	entities := make([]*T, 0, len(items))
-	for name, data := range items {
-		keys = append(keys, qb.nameKey(name))
-		entities = append(entities, data)
+	// Sorted so that batch boundaries, and so the keys named by a failure, are
+	// the same on every run rather than following Go's map iteration order.
+	names := make([]string, 0, len(items))
+	for name := range items {
+		names = append(names, name)
+	}
+	slices.Sort(names)
+
+	keys := make([]*datastore.Key, len(names))
+	entities := make([]*T, len(names))
+	for i, name := range names {
+		keys[i] = qb.nameKey(name)
+		entities[i] = items[name]
 	}
 
 	for start := 0; start < len(keys); start += maxCommitSize {
 		end := min(start+maxCommitSize, len(keys))
 		if _, err := qb.db.client.PutMulti(ctx, keys[start:end], entities[start:end]); err != nil {
-			return fmt.Errorf("dsx: upsert-multi %s [%d:%d]: %w", qb.kind, start, end, err)
+			return fmt.Errorf("dsx: upsert-multi %s [%s..%s]: %w", qb.kind, names[start], names[end-1], err)
 		}
 	}
 
@@ -1007,8 +1071,10 @@ func (qb *QueryBuilder[T]) UpsertMulti(ctx context.Context, items map[string]*T)
 // InsertMultiWithAutoKey inserts multiple entities with auto-generated keys,
 // in batches of [maxCommitSize], and returns the complete keys in input order.
 //
-// Note: each batch is committed independently, so a failure part-way through a
-// large write leaves the batches before it applied.
+// Note: each batch is committed independently. If a batch fails, the keys of
+// the batches already committed are returned alongside the error, since those
+// entities exist and the caller would otherwise have no way to reference or
+// clean them up.
 //
 // Example:
 //
@@ -1035,7 +1101,9 @@ func (qb *QueryBuilder[T]) InsertMultiWithAutoKey(ctx context.Context, entities 
 		end := min(start+maxCommitSize, len(entities))
 		batch, err := qb.db.client.PutMulti(ctx, keys[start:end], entities[start:end])
 		if err != nil {
-			return nil, fmt.Errorf("dsx: insert-multi-with-auto-key %s [%d:%d]: %w", qb.kind, start, end, err)
+			// The batches before this one are committed. Return their keys so
+			// the caller can reference or clean up what was written.
+			return completeKeys, fmt.Errorf("dsx: insert-multi-with-auto-key %s [%d:%d]: %w", qb.kind, start, end, err)
 		}
 		completeKeys = append(completeKeys, batch...)
 	}

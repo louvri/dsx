@@ -185,8 +185,7 @@ func TestBuilderAccessors(t *testing.T) {
 	ancestor := datastore.NameKey("Company", "acme", nil)
 	builder := Query[testUser](db, "Employee").
 		WithAncestorKey(ancestor).
-		WithAncestorKey(nil). // ignored
-		KeysOnly()
+		WithAncestorKey(nil) // ignored
 
 	if builder.DB() != db {
 		t.Error("DB() did not return the connection the query was built from")
@@ -202,7 +201,6 @@ func TestBuilderAccessors(t *testing.T) {
 		t.Fatalf("Select: %v", err)
 	}
 	query := fake.lastQuery(t).GetQuery()
-	assertEqualSlices(t, "projection", projectedFields(query), []string{"__key__"})
 	if got := propertyFilters(query); len(got) != 1 || !strings.Contains(got[0], "Company/acme") {
 		t.Errorf("filters = %v, want an ancestor filter on Company/acme", got)
 	}

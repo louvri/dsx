@@ -53,7 +53,6 @@ func ExampleQuery() {
 
 	users, err := dsx.Query[User](db, "User").
 		WithFilter("Status", dsx.OpEqual, "active").
-		WithFilter("Status", dsx.OpIn, []string{"active", "pending"}).
 		WithOrderDesc("CreatedAt").
 		WithLimit(50).
 		Select(ctx)
@@ -63,6 +62,34 @@ func ExampleQuery() {
 
 	for _, user := range users {
 		fmt.Println(user.Name)
+	}
+}
+
+// OpIn and OpNotIn take any slice, not only a []any.
+func ExampleQueryBuilder_WithFilter_membership() {
+	ctx, db := context.Background(), newDB()
+
+	users, err := dsx.Query[User](db, "User").
+		WithFilter("Status", dsx.OpIn, []string{"active", "pending"}).
+		Select(ctx)
+	if err != nil {
+		log.Fatal(err)
+	}
+	fmt.Println(len(users))
+}
+
+func ExampleQueryBuilder_SelectKeys() {
+	ctx, db := context.Background(), newDB()
+
+	// Returns the matching keys without loading the entities.
+	keys, err := dsx.Query[User](db, "User").
+		WithFilter("Status", dsx.OpEqual, "inactive").
+		SelectKeys(ctx)
+	if err != nil {
+		log.Fatal(err)
+	}
+	for _, key := range keys {
+		fmt.Println(key.Name)
 	}
 }
 

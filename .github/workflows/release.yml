@@ -17,27 +17,68 @@ jobs:
 
       - name: Determine next version
         id: version
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -euo pipefail
 
-          tag=$(git tag --sort=-v:refname | head -n 1)
-          tag="${tag:-v0.0.0}"
-          version="${tag#v}"
-          major="${version%%.*}"
-          rest="${version#*.}"
-          minor="${rest%%.*}"
-          patch="${rest#*.}"
+          # Read the tag list into a variable rather than piping to head: with
+          # `pipefail`, git being SIGPIPE'd once the list outgrows the pipe
+          # buffer would fail the step.
+          tags=$(git tag --sort=-v:refname --list 'v[0-9]*.[0-9]*.[0-9]*')
 
-          # The bump level is taken from the merged commit message, so a
-          # breaking change never ships as a patch release. Default: patch.
+          # Take the newest tag that is exactly vMAJOR.MINOR.PATCH. The glob
+          # above still admits things like v1.2.3-rc1, and skipping those is
+          # safer than resetting to v0.0.0 and re-tagging an existing version.
+          tag="v0.0.0"
+          major=0
+          minor=0
+          patch=0
+          while IFS= read -r candidate; do
+            if [[ "$candidate" =~ ^v([0-9]+)\.([0-9]+)\.([0-9]+)$ ]]; then
+              tag="$candidate"
+              major="${BASH_REMATCH[1]}"
+              minor="${BASH_REMATCH[2]}"
+              patch="${BASH_REMATCH[3]}"
+              break
+            fi
+          done <<< "$tags"
+
           message=$(git log -1 --pretty=%B)
+          subject="${message%%$'\n'*}"
+
+          # An explicit [major]/[minor]/[patch] marker anywhere in the message
+          # wins. Otherwise the level comes from the conventional-commit
+          # subject, which is what this repo actually writes.
+          level=""
           case "$message" in
             *"[major]"*) level="major" ;;
             *"[minor]"*) level="minor" ;;
-            *)           level="patch" ;;
+            *"[patch]"*) level="patch" ;;
           esac
+
+          if [ -z "$level" ]; then
+            if [[ "$subject" =~ ^[a-z]+(\([^\)]*\))?!: ]] || [[ "$message" == *"BREAKING CHANGE:"* ]]; then
+              intent="breaking"
+            elif [[ "$subject" =~ ^feat(\([^\)]*\))?: ]]; then
+              intent="feature"
+            else
+              intent="fix"
+            fi
+
+            # Below v1.0.0, semver keeps breaking changes in the minor position
+            # and everything else in the patch position.
+            if [ "$major" -eq 0 ]; then
+              case "$intent" in
+                breaking) level="minor" ;;
+                *)        level="patch" ;;
+              esac
+            else
+              case "$intent" in
+                breaking) level="major" ;;
+                feature)  level="minor" ;;
+                *)        level="patch" ;;
+              esac
+            fi
+          fi
 
           case "$level" in
             major) major=$((major + 1)); minor=0; patch=0 ;;

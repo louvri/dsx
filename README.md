@@ -101,11 +101,15 @@ v0.1.0 is a breaking release. The changes are mechanical and the compiler finds 
 | `dsx.DeleteMultiByKey(db, ctx, ...)` | `dsx.DeleteMultiByKey(ctx, db, ...)` | |
 | `dsx.RunInTransaction(db, ctx, fn)` | `dsx.RunInTransaction(ctx, db, fn)` | |
 | `dsx.Connect(ctx, project, database, credJSON)` | `dsx.Connect(ctx, project, database, dsx.WithCredentialsJSON(credJSON))` | Options leave room for namespaces and client settings without another signature change. |
+| `.KeysOnly().Select(ctx)` | `.SelectKeys(ctx)` | `KeysOnly` + `Select` returned zero entities and a nil error: Datastore skips entity loading for a keys-only query, so there was nothing to decode. `SelectKeys` returns the keys instead. |
 | `dsx.SetLogger(l)`, `dsx.Logger` | *(removed)* | A library should not log. Errors are wrapped with the operation and kind, so the caller logs them once, with its own logger and fields. |
 | `errors.New("query defined to use cursor")` | `dsx.ErrPaginationConflict` | Comparable with `errors.Is`. |
 
-Two fixes need no migration but change behavior:
+These fixes need no migration but change behavior:
 
+- **`OpNotIn` works at all now.** It was defined as `"not in"` where Datastore spells the operator `"not-in"`, so every `WithFilter(field, dsx.OpNotIn, ...)` failed. If you worked around it, you can drop the workaround.
+- **An unknown `FilterOperator` is now rejected by the builder.** Previously `Count` silently dropped a filter the Datastore client refused and returned a count over more rows than you asked for.
+- **An undecodable cursor is now an error.** It used to be logged and ignored, which silently served page 1. A service that accepts a cursor from a client will now return an error where it previously returned the first page.
 - **`OpIn` and `OpNotIn` now accept any slice.** `WithFilter("Status", dsx.OpIn, []string{"active", "pending"})` was documented but rejected by Datastore, which only accepts `[]any`. dsx now converts the slice for you.
 - **Batch operations chunk automatically.** `UpsertMulti`, `InsertMultiWithAutoKey` and `GetMulti` previously sent everything in one request and failed above Datastore's limits. Each now splits into requests of 500 (writes) or 1000 (reads).
 
@@ -150,7 +154,14 @@ users, err := dsx.Query[User](db, "User").
     Select(ctx)
 ```
 
-The namespace applies to queries *and* to the keys the builder writes, deletes or filters on. `WithNamespace` may appear anywhere in the chain. An empty namespace means the default namespace.
+The namespace applies to queries *and* to the keys dsx builds from a name - the keys it writes, deletes, and filters on. `WithNamespace` may appear anywhere in the chain, including after a key filter. An empty namespace means the default namespace.
+
+Keys **you** build are used exactly as you give them, namespace included. That covers `WithAncestorKey`, a `*datastore.Key` passed to `WithFilter`, and anything inside `RunInTransaction`. Datastore rejects a query whose ancestor or key filter sits in a different partition from the query, so set the namespace yourself:
+
+```go
+companyKey := datastore.NameKey("Company", "acme", nil)
+companyKey.Namespace = db.Namespace()
+```
 
 `db.WithNamespace` returns a copy that shares the underlying client, so it must not be closed separately - closing any copy closes the connection for all of them.
 
@@ -205,7 +216,7 @@ users, err := dsx.Query[User](db, "User").
 | `dsx.OpLess` | `<` | Less than |
 | `dsx.OpLessEqual` | `<=` | Less than or equal |
 | `dsx.OpIn` | `in` | Member of a slice |
-| `dsx.OpNotIn` | `not in` | Not a member of a slice |
+| `dsx.OpNotIn` | `not-in` | Not a member of a slice |
 
 #### Ordering
 
@@ -313,7 +324,7 @@ users := map[string]*User{
 err := dsx.Query[User](db, "User").UpsertMulti(ctx, users)
 ```
 
-Split into commits of 500 automatically. Each commit is independent, so a failure part-way through leaves the batches before it applied.
+Split into commits of 500 automatically. Keys are written in sorted order, so batch boundaries are stable across runs and a failure names the first and last key of the batch that failed. Each commit is independent, so a failure part-way through leaves the batches before it applied.
 
 #### Insert with Auto-generated Key
 
@@ -336,7 +347,7 @@ orders := []*Order{
 keys, err := dsx.Query[Order](db, "Order").InsertMultiWithAutoKey(ctx, orders)
 ```
 
-Returns the complete keys in input order, committing in batches of 500.
+Returns the complete keys in input order, committing in batches of 500. If a batch fails, the keys of the batches already committed are returned **alongside** the error - those entities exist, and this is the only way to learn the IDs Datastore assigned them.
 
 ### Deleting
 
@@ -363,6 +374,8 @@ Query-based `Delete` streams keys from a keys-only query and deletes them in bat
 
 ```go
 companyKey := datastore.NameKey("Company", "acme", nil)
+companyKey.Namespace = db.Namespace() // keys you build carry their own namespace
+
 employees, err := dsx.Query[Employee](db, "Employee").
     WithAncestorKey(companyKey).
     Select(ctx)
@@ -409,8 +422,12 @@ users, err := dsx.Query[User](db, "User").
 #### Keys Only
 
 ```go
-users, err := dsx.Query[User](db, "User").KeysOnly().Select(ctx)
+keys, err := dsx.Query[User](db, "User").
+    WithFilter("Status", dsx.OpEqual, "inactive").
+    SelectKeys(ctx)
 ```
+
+Returns `[]*datastore.Key` without loading the entities - the cheap way to check what matches, or to hand keys to `RunInTransaction`.
 
 #### Access Underlying Client
 
@@ -552,6 +569,20 @@ users, err := dsx.Query[User](db, "User").
 ```
 
 `QueryBuilder.Err()` exposes the same error earlier if you want to check before executing.
+
+## Releasing
+
+Pushing to `main` tags a release automatically. The bump level comes from the merged commit message - which for a squash merge is the pull request title - so write it as a [conventional commit](https://www.conventionalcommits.org/):
+
+| Commit subject | Below v1.0.0 | v1.0.0 and above |
+| --- | --- | --- |
+| `feat!:` / `fix!:` / `BREAKING CHANGE:` in the body | minor | major |
+| `feat:` | patch | minor |
+| anything else (`fix:`, `docs:`, `chore:`, ...) | patch | patch |
+
+Below v1.0.0, semver keeps breaking changes in the minor position, which is why this release is v0.1.0 rather than v1.0.0.
+
+To override the level, put `[major]`, `[minor]` or `[patch]` anywhere in the commit message; an explicit marker always wins.
 
 ## License
 
