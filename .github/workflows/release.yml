@@ -27,8 +27,9 @@ jobs:
 
           # Take the newest tag that is exactly vMAJOR.MINOR.PATCH. The glob
           # above still admits things like v1.2.3-rc1, and skipping those is
-          # safer than resetting to v0.0.0 and re-tagging an existing version.
-          tag="v0.0.0"
+          # safer than falling back to v0.0.0 and re-tagging a version that
+          # already exists.
+          tag=""
           major=0
           minor=0
           patch=0
@@ -42,23 +43,42 @@ jobs:
             fi
           done <<< "$tags"
 
-          message=$(git log -1 --pretty=%B)
-          subject="${message%%$'\n'*}"
+          # Read every commit since that tag rather than only the tip, so the
+          # bump does not depend on whether the pull request was squashed,
+          # merged or rebased.
+          if [ -n "$tag" ]; then
+            range="${tag}..HEAD"
+          else
+            tag="v0.0.0"
+            range="HEAD"
+          fi
+          subjects=$(git log "$range" --pretty=%s)
+          messages=$(git log "$range" --pretty=%B)
 
-          # An explicit [major]/[minor]/[patch] marker anywhere in the message
-          # wins. Otherwise the level comes from the conventional-commit
-          # subject, which is what this repo actually writes.
+          # A squash merge collapses the branch into one commit whose body
+          # lists the original subjects as "* subject", so read those as
+          # subjects too - otherwise a squash with a non-conventional title
+          # hides the breaking change that the commits themselves declared.
+          bullets=$(grep -E '^\* ' <<< "$messages" | sed -E 's/^\* //' || true)
+          subjects=$(printf '%s\n%s\n' "$subjects" "$bullets")
+
+          # An explicit override has to be its own trailer line. Matching a bare
+          # marker anywhere in the prose would let a commit that merely
+          # *mentions* it cut the wrong release.
           level=""
-          case "$message" in
-            *"[major]"*) level="major" ;;
-            *"[minor]"*) level="minor" ;;
-            *"[patch]"*) level="patch" ;;
-          esac
+          if grep -qxE 'Release-As: major' <<< "$messages"; then
+            level="major"
+          elif grep -qxE 'Release-As: minor' <<< "$messages"; then
+            level="minor"
+          elif grep -qxE 'Release-As: patch' <<< "$messages"; then
+            level="patch"
+          fi
 
           if [ -z "$level" ]; then
-            if [[ "$subject" =~ ^[a-z]+(\([^\)]*\))?!: ]] || [[ "$message" == *"BREAKING CHANGE:"* ]]; then
+            if grep -qE '^BREAKING CHANGE: ' <<< "$messages" \
+              || grep -qE '^[a-z]+(\([^)]*\))?!:' <<< "$subjects"; then
               intent="breaking"
-            elif [[ "$subject" =~ ^feat(\([^\)]*\))?: ]]; then
+            elif grep -qE '^feat(\([^)]*\))?:' <<< "$subjects"; then
               intent="feature"
             else
               intent="fix"

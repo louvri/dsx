@@ -2,6 +2,7 @@ package dsx
 
 import (
 	"context"
+	"math"
 	"strings"
 	"testing"
 
@@ -207,5 +208,97 @@ func TestUpsertMultiBatchesDeterministicallyAndNamesKeys(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "[key-0500..key-0999]") {
 		t.Errorf("error = %q, want it to name the failing key range", err)
+	}
+}
+
+// An empty key name builds an incomplete key, which Datastore commits as an
+// auto-ID insert: a brand-new duplicate entity on every call, unreachable by
+// name. Upsert and UpsertMulti were the only entry points that accepted it.
+func TestWritesRejectEmptyKeyName(t *testing.T) {
+	db, fake := newTestDB(t)
+	ctx := context.Background()
+
+	if err := Query[testUser](db, "User").Upsert(ctx, "", &testUser{}); err == nil ||
+		!strings.Contains(err.Error(), "key name must not be empty") {
+		t.Errorf("Upsert err = %v, want a key name must not be empty error", err)
+	}
+
+	items := map[string]*testUser{"": {}, "ok": {}}
+	if err := Query[testUser](db, "User").UpsertMulti(ctx, items); err == nil ||
+		!strings.Contains(err.Error(), "key name must not be empty") {
+		t.Errorf("UpsertMulti err = %v, want a key name must not be empty error", err)
+	}
+
+	fake.mu.Lock()
+	defer fake.mu.Unlock()
+	if len(fake.commits) != 0 {
+		t.Errorf("made %d commits, want none: an empty key name must not write", len(fake.commits))
+	}
+}
+
+// Datastore's client records an internal error for an out-of-range limit or
+// offset and leaves the bound unset. Select surfaces that error but Count does
+// not, so an unchecked bound made Count report more rows than the caller asked
+// for. The builder now rejects it before either can run.
+func TestOutOfRangeLimitAndOffsetFailClosed(t *testing.T) {
+	db, fake := newTestDB(t)
+	ctx := context.Background()
+
+	tests := map[string]*QueryBuilder[testUser]{
+		"limit":  Query[testUser](db, "User").WithLimit(math.MaxInt32 + 1),
+		"offset": Query[testUser](db, "User").WithOffset(math.MaxInt32 + 1),
+	}
+
+	for name, builder := range tests {
+		t.Run(name, func(t *testing.T) {
+			if err := builder.Err(); err == nil || !strings.Contains(err.Error(), "exceeds the maximum") {
+				t.Fatalf("Err() = %v, want an exceeds the maximum error", err)
+			}
+			if _, err := builder.Count(ctx); err == nil {
+				t.Error("Count succeeded; it must not count over a silently dropped bound")
+			}
+			if _, err := builder.Select(ctx); err == nil {
+				t.Error("Select succeeded")
+			}
+		})
+	}
+
+	// In-range values at the boundary must still work.
+	if err := Query[testUser](db, "User").WithLimit(math.MaxInt32).Err(); err != nil {
+		t.Errorf("WithLimit(MaxInt32) = %v, want nil", err)
+	}
+	if err := Query[testUser](db, "User").WithOffset(math.MaxInt32).Err(); err != nil {
+		t.Errorf("WithOffset(MaxInt32) = %v, want nil", err)
+	}
+
+	fake.mu.Lock()
+	defer fake.mu.Unlock()
+	if len(fake.queries)+len(fake.aggregations) != 0 {
+		t.Error("an out-of-range bound still let a request reach the server")
+	}
+}
+
+// A caller-built key with no name and no ID encodes as a key value with an
+// empty path element and matches nothing, the same mistake the empty string
+// spelling already reported.
+func TestKeyFilterRejectsIncompleteKey(t *testing.T) {
+	db, _ := newTestDB(t)
+	incomplete := datastore.IncompleteKey("User", nil)
+
+	tests := map[string]struct {
+		operator FilterOperator
+		value    any
+	}{
+		"single":         {OpEqual, incomplete},
+		"inside a slice": {OpIn, []any{"good", incomplete}},
+	}
+
+	for name, test := range tests {
+		t.Run(name, func(t *testing.T) {
+			builder := Query[testUser](db, "User").WithFilter(FieldKey, test.operator, test.value)
+			if builder.Err() == nil || !strings.Contains(builder.Err().Error(), "key must not be incomplete") {
+				t.Fatalf("Err() = %v, want a key must not be incomplete error", builder.Err())
+			}
+		})
 	}
 }

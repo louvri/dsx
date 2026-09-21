@@ -165,7 +165,7 @@ companyKey.Namespace = db.Namespace()
 
 `db.WithNamespace` returns a copy that shares the underlying client, so it must not be closed separately - closing any copy closes the connection for all of them.
 
-Keys you build yourself, including inside a transaction, keep the namespace you give them; `db.Namespace()` reports the one in effect.
+`db.Namespace()` reports the namespace in effect.
 
 ### Querying
 
@@ -314,6 +314,8 @@ user := User{Name: "John", Email: "john@example.com", Status: "active"}
 err := dsx.Query[User](db, "User").Upsert(ctx, "user-123", &user)
 ```
 
+An empty key name is rejected. Datastore would otherwise treat it as an incomplete key and commit an auto-ID insert, creating a new entity on every call; use `InsertWithAutoKey` when that is what you want.
+
 #### Multiple Entities
 
 ```go
@@ -427,7 +429,7 @@ keys, err := dsx.Query[User](db, "User").
     SelectKeys(ctx)
 ```
 
-Returns `[]*datastore.Key` without loading the entities - the cheap way to check what matches, or to hand keys to `RunInTransaction`.
+Returns `[]*datastore.Key` without loading the entities - the cheap way to check what matches, or to hand keys to `RunInTransaction`. Every matching key is held in memory, so use `WithLimit` on a kind that may match a very large number of entities; `Delete` streams instead and needs no bound.
 
 #### Access Underlying Client
 
@@ -572,7 +574,7 @@ users, err := dsx.Query[User](db, "User").
 
 ## Releasing
 
-Pushing to `main` tags a release automatically. The bump level comes from the merged commit message - which for a squash merge is the pull request title - so write it as a [conventional commit](https://www.conventionalcommits.org/):
+Pushing to `main` tags a release automatically. The bump level is read from every commit since the last release tag, so it does not matter whether a pull request is squashed, merged or rebased. Write the subject as a [conventional commit](https://www.conventionalcommits.org/):
 
 | Commit subject | Below v1.0.0 | v1.0.0 and above |
 | --- | --- | --- |
@@ -582,7 +584,13 @@ Pushing to `main` tags a release automatically. The bump level comes from the me
 
 Below v1.0.0, semver keeps breaking changes in the minor position, which is why this release is v0.1.0 rather than v1.0.0.
 
-To override the level, put `[major]`, `[minor]` or `[patch]` anywhere in the commit message; an explicit marker always wins.
+To set the level explicitly, add a `Release-As:` trailer on its own line in the commit message:
+
+```
+Release-As: minor
+```
+
+An explicit trailer always wins. It has to be a whole line, so prose that merely mentions a level cannot trigger a release.
 
 ## License
 

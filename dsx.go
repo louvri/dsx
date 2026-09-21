@@ -31,6 +31,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"math"
 	"reflect"
 	"slices"
 
@@ -113,7 +114,7 @@ type (
 	keyFilter struct {
 		operator FilterOperator
 		refs     []keyRef
-		multi    bool // the filter value was a slice, as "in" and "not in" require
+		multi    bool // the filter value was a slice, as "in" and "not-in" require
 	}
 
 	// keyRef is a key a filter was given, either already built by the caller or
@@ -441,7 +442,7 @@ func (qb *QueryBuilder[T]) resolveKeyRef(ref keyRef) *datastore.Key {
 	return qb.nameKey(ref.name)
 }
 
-// membershipValues converts the value given to an "in" or "not in" filter into
+// membershipValues converts the value given to an "in" or "not-in" filter into
 // the []any that Datastore's value encoding accepts, so that an ordinary
 // []string or []int works rather than only a []any.
 func membershipValues(value any) ([]any, error) {
@@ -481,6 +482,9 @@ func keyRefOf(value any) (keyRef, error) {
 	case *datastore.Key:
 		if typed == nil {
 			return keyRef{}, errors.New("key must not be nil")
+		}
+		if typed.Incomplete() {
+			return keyRef{}, errors.New("key must not be incomplete")
 		}
 		return keyRef{key: typed}, nil
 	default:
@@ -528,10 +532,14 @@ func (qb *QueryBuilder[T]) WithDistinct() *QueryBuilder[T] {
 //	    WithLimit(10).
 //	    Select(ctx)
 func (qb *QueryBuilder[T]) WithLimit(limit int) *QueryBuilder[T] {
-	if limit > 0 {
-		qb.query = qb.query.Limit(limit)
-		qb.limit = limit
+	if limit <= 0 {
+		return qb
 	}
+	if limit > math.MaxInt32 {
+		return qb.fail(fmt.Errorf("dsx: %s: limit %d exceeds the maximum of %d", qb.kind, limit, math.MaxInt32))
+	}
+	qb.query = qb.query.Limit(limit)
+	qb.limit = limit
 	return qb
 }
 
@@ -557,6 +565,9 @@ func (qb *QueryBuilder[T]) WithLimit(limit int) *QueryBuilder[T] {
 func (qb *QueryBuilder[T]) WithOffset(offset int) *QueryBuilder[T] {
 	if offset <= 0 {
 		return qb
+	}
+	if offset > math.MaxInt32 {
+		return qb.fail(fmt.Errorf("dsx: %s: offset %d exceeds the maximum of %d", qb.kind, offset, math.MaxInt32))
 	}
 	if qb.usingCursor {
 		return qb.fail(ErrPaginationConflict)
@@ -898,6 +909,10 @@ func (qb *QueryBuilder[T]) Select(ctx context.Context) ([]T, error) {
 //
 // Returns [ErrPaginationConflict] if the query was configured with WithCursor.
 //
+// Note: every matching key is held in memory. Use WithLimit on a kind that may
+// match a very large number of entities; [QueryBuilder.Delete] streams instead,
+// so it does not need a bound.
+//
 // Example:
 //
 //	keys, err := dsx.Query[User](db, "User").
@@ -971,6 +986,12 @@ func (qb *QueryBuilder[T]) Get(ctx context.Context) (*T, error) {
 func (qb *QueryBuilder[T]) Upsert(ctx context.Context, key string, data *T) error {
 	if qb.err != nil {
 		return qb.err
+	}
+	if key == "" {
+		// An incomplete key would be committed as an auto-ID insert, silently
+		// creating a new entity on every call. Use InsertWithAutoKey to ask for
+		// a generated key on purpose.
+		return fmt.Errorf("dsx: upsert %s: key name must not be empty", qb.kind)
 	}
 
 	if _, err := qb.db.client.Put(ctx, qb.nameKey(key), data); err != nil {
@@ -1050,6 +1071,11 @@ func (qb *QueryBuilder[T]) UpsertMulti(ctx context.Context, items map[string]*T)
 		names = append(names, name)
 	}
 	slices.Sort(names)
+	if names[0] == "" {
+		// Sorted, so an empty name can only be first. It would be committed as
+		// an auto-ID insert rather than the upsert the caller asked for.
+		return fmt.Errorf("dsx: upsert-multi %s: key name must not be empty", qb.kind)
+	}
 
 	keys := make([]*datastore.Key, len(names))
 	entities := make([]*T, len(names))
