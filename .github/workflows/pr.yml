@@ -8,35 +8,7 @@ permissions:
   contents: read
 
 jobs:
-  build-and-lint:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-
-      - uses: actions/setup-go@v5
-        with:
-          go-version-file: go.mod
-
-      - name: Build
-        run: go build ./...
-
-      - name: Vet
-        run: go vet ./...
-
-      - name: Test
-        run: go test -race -coverprofile=coverage.out ./...
-
-      - name: Coverage
-        run: go tool cover -func=coverage.out
-
-      - name: Lint
-        uses: golangci/golangci-lint-action@v7
-        with:
-          # Pinned: `latest` lets a linter release turn an unrelated PR red.
-          version: v2.13.2
-
-      - name: Shellcheck release scripts
-        run: shellcheck .github/scripts/*.sh
-
-      - name: Test release versioning
-        run: .github/scripts/next-version_test.sh
+  verify:
+    uses: ./.github/workflows/verify.yml
+    with:
+      coverage: true

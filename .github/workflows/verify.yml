@@ -1,0 +1,53 @@
+# The checks that must pass before code is merged or released.
+#
+# Called by pr.yml for pull requests and by release.yml before it publishes a
+# tag. Keeping them in one place means a check added here cannot be added to
+# one path and forgotten on the other - and the release path is the one where
+# a gap is unrecoverable, since a tag on proxy.golang.org cannot be withdrawn.
+name: Verify
+
+on:
+  workflow_call:
+    inputs:
+      coverage:
+        description: Print the coverage report. Useful on a pull request, noise during a release.
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+jobs:
+  checks:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      - name: Build
+        run: go build ./...
+
+      - name: Vet
+        run: go vet ./...
+
+      - name: Test
+        run: go test -race -coverprofile=coverage.out ./...
+
+      - name: Coverage
+        if: inputs.coverage
+        run: go tool cover -func=coverage.out
+
+      - name: Lint
+        uses: golangci/golangci-lint-action@v7
+        with:
+          # Pinned: `latest` lets a linter release turn an unrelated PR red.
+          version: v2.13.2
+
+      - name: Shellcheck release scripts
+        run: shellcheck .github/scripts/*.sh
+
+      - name: Test release versioning
+        run: .github/scripts/next-version_test.sh
