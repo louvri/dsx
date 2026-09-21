@@ -244,9 +244,17 @@ func TestOutOfRangeLimitAndOffsetFailClosed(t *testing.T) {
 	db, fake := newTestDB(t)
 	ctx := context.Background()
 
+	if math.MaxInt <= math.MaxInt32 {
+		t.Skip("int is 32 bits on this platform, so a value above MaxInt32 cannot be expressed")
+	}
+	// Held in a variable so the expression is not constant-folded: a constant
+	// above MaxInt32 does not compile where int is 32 bits, conversion or not.
+	bound := int64(math.MaxInt32)
+	over := int(bound + 1)
+
 	tests := map[string]*QueryBuilder[testUser]{
-		"limit":  Query[testUser](db, "User").WithLimit(math.MaxInt32 + 1),
-		"offset": Query[testUser](db, "User").WithOffset(math.MaxInt32 + 1),
+		"limit":  Query[testUser](db, "User").WithLimit(over),
+		"offset": Query[testUser](db, "User").WithOffset(over),
 	}
 
 	for name, builder := range tests {
@@ -300,5 +308,45 @@ func TestKeyFilterRejectsIncompleteKey(t *testing.T) {
 				t.Fatalf("Err() = %v, want a key must not be incomplete error", builder.Err())
 			}
 		})
+	}
+}
+
+// datastore.Key.Incomplete only inspects the leaf, so a key whose *parent* is
+// incomplete used to pass the guard and reach the wire, matching nothing.
+func TestIncompleteAncestorIsRejected(t *testing.T) {
+	db, fake := newTestDB(t)
+	childOfIncomplete := datastore.NameKey("User", "u1", datastore.IncompleteKey("Org", nil))
+
+	t.Run("as a key filter value", func(t *testing.T) {
+		builder := Query[testUser](db, "User").WithFilter(FieldKey, OpEqual, childOfIncomplete)
+		if builder.Err() == nil || !strings.Contains(builder.Err().Error(), "key must not be incomplete") {
+			t.Fatalf("Err() = %v, want a key must not be incomplete error", builder.Err())
+		}
+	})
+
+	t.Run("as an ancestor", func(t *testing.T) {
+		builder := Query[testUser](db, "Employee").WithAncestorKey(datastore.IncompleteKey("Company", nil))
+		if builder.Err() == nil || !strings.Contains(builder.Err().Error(), "ancestor key must not be incomplete") {
+			t.Fatalf("Err() = %v, want an ancestor key must not be incomplete error", builder.Err())
+		}
+	})
+
+	t.Run("a complete chain is still accepted", func(t *testing.T) {
+		parent := datastore.NameKey("Org", "acme", nil)
+		builder := Query[testUser](db, "User").
+			WithAncestorKey(parent).
+			WithFilter(FieldKey, OpEqual, datastore.NameKey("User", "u1", parent))
+		if err := builder.Err(); err != nil {
+			t.Fatalf("Err() = %v, want nil", err)
+		}
+		if _, err := builder.Select(context.Background()); err != nil {
+			t.Fatalf("Select: %v", err)
+		}
+	})
+
+	fake.mu.Lock()
+	defer fake.mu.Unlock()
+	if len(fake.queries) != 1 {
+		t.Errorf("queries reaching the server = %d, want only the valid one", len(fake.queries))
 	}
 }

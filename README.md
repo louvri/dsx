@@ -576,11 +576,13 @@ users, err := dsx.Query[User](db, "User").
 
 Pushing to `main` tags a release automatically. The bump level is read from every commit since the last release tag, so it does not matter whether a pull request is squashed, merged or rebased. Write the subject as a [conventional commit](https://www.conventionalcommits.org/):
 
-| Commit subject | Below v1.0.0 | v1.0.0 and above |
+| Commit | Below v1.0.0 | v1.0.0 and above |
 | --- | --- | --- |
-| `feat!:` / `fix!:` / `BREAKING CHANGE:` in the body | minor | major |
-| `feat:` | patch | minor |
+| any type with `!` (`feat!:`, `fix!:`, `refactor(api)!:`), or a `BREAKING CHANGE:` / `BREAKING-CHANGE:` line in the body | minor | major |
+| `feat:` / `feat(scope):` | patch | minor |
 | anything else (`fix:`, `docs:`, `chore:`, ...) | patch | patch |
+
+When a pull request is squashed, the generated body lists the original commit subjects as `* subject` lines, and those count as subjects too - so a squash keeps the right level even if its title is not a conventional commit.
 
 Below v1.0.0, semver keeps breaking changes in the minor position, which is why this release is v0.1.0 rather than v1.0.0.
 
@@ -590,7 +592,7 @@ To set the level explicitly, add a `Release-As:` trailer on its own line in the 
 Release-As: minor
 ```
 
-An explicit trailer always wins. It has to be a whole line, so prose that merely mentions a level cannot trigger a release.
+An explicit trailer always wins, and has to be a whole line, so prose that merely mentions a level cannot trigger a release. If several commits in the range carry different trailers, the highest level is used.
 
 ## License
 

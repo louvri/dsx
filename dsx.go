@@ -471,6 +471,20 @@ func (o FilterOperator) valid() bool {
 	return false
 }
 
+// incomplete reports whether key, or any of its ancestors, lacks both a name
+// and an ID. datastore.Key.Incomplete only inspects the leaf, and the client
+// only validates the chain on get/put/delete - never on a key used as a query
+// filter value or an ancestor, where an empty path element simply matches
+// nothing.
+func incomplete(key *datastore.Key) bool {
+	for k := key; k != nil; k = k.Parent {
+		if k.Incomplete() {
+			return true
+		}
+	}
+	return false
+}
+
 // keyRefOf records how a key filter value should later become a key.
 func keyRefOf(value any) (keyRef, error) {
 	switch typed := value.(type) {
@@ -483,7 +497,7 @@ func keyRefOf(value any) (keyRef, error) {
 		if typed == nil {
 			return keyRef{}, errors.New("key must not be nil")
 		}
-		if typed.Incomplete() {
+		if incomplete(typed) {
 			return keyRef{}, errors.New("key must not be incomplete")
 		}
 		return keyRef{key: typed}, nil
@@ -521,7 +535,8 @@ func (qb *QueryBuilder[T]) WithDistinct() *QueryBuilder[T] {
 }
 
 // WithLimit sets the maximum number of entities to return.
-// A limit of 0 or negative is ignored.
+// A limit of 0 or negative is ignored. A limit above math.MaxInt32, which
+// Datastore cannot express, records an error on the builder.
 //
 // Returns the QueryBuilder for method chaining.
 //
@@ -544,7 +559,8 @@ func (qb *QueryBuilder[T]) WithLimit(limit int) *QueryBuilder[T] {
 }
 
 // WithOffset sets the number of entities to skip before returning results.
-// An offset of 0 or negative is ignored.
+// An offset of 0 or negative is ignored. An offset above math.MaxInt32, which
+// Datastore cannot express, records an error on the builder.
 //
 // Note: Using offset marks the query as offset-based pagination, which is
 // incompatible with cursor-based pagination (SelectWithCursor). Combining the
@@ -566,11 +582,11 @@ func (qb *QueryBuilder[T]) WithOffset(offset int) *QueryBuilder[T] {
 	if offset <= 0 {
 		return qb
 	}
-	if offset > math.MaxInt32 {
-		return qb.fail(fmt.Errorf("dsx: %s: offset %d exceeds the maximum of %d", qb.kind, offset, math.MaxInt32))
-	}
 	if qb.usingCursor {
 		return qb.fail(ErrPaginationConflict)
+	}
+	if offset > math.MaxInt32 {
+		return qb.fail(fmt.Errorf("dsx: %s: offset %d exceeds the maximum of %d", qb.kind, offset, math.MaxInt32))
 	}
 	qb.query = qb.query.Offset(offset)
 	qb.usingOffset = true
@@ -736,7 +752,8 @@ func (qb *QueryBuilder[T]) WithFilter(field string, operator FilterOperator, val
 // descendants of the specified ancestor key. This enables strongly
 // consistent queries within an entity group.
 //
-// A nil ancestor key is ignored.
+// A nil ancestor key is ignored; an incomplete one records an error on the
+// builder, since it would match nothing.
 //
 // The ancestor key is used exactly as given, including its namespace. On a
 // namespaced connection, build it in the same namespace - Datastore rejects a
@@ -754,9 +771,13 @@ func (qb *QueryBuilder[T]) WithFilter(field string, operator FilterOperator, val
 //	    WithAncestorKey(companyKey).
 //	    Select(ctx)
 func (qb *QueryBuilder[T]) WithAncestorKey(ancestorKey *datastore.Key) *QueryBuilder[T] {
-	if ancestorKey != nil {
-		qb.query = qb.query.Ancestor(ancestorKey)
+	if ancestorKey == nil {
+		return qb
 	}
+	if incomplete(ancestorKey) {
+		return qb.fail(fmt.Errorf("dsx: %s: ancestor key must not be incomplete", qb.kind))
+	}
+	qb.query = qb.query.Ancestor(ancestorKey)
 	return qb
 }
 

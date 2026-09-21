@@ -33,3 +33,9 @@ jobs:
         uses: golangci/golangci-lint-action@v7
         with:
           version: latest
+
+      - name: Shellcheck release scripts
+        run: shellcheck .github/scripts/*.sh
+
+      - name: Test release versioning
+        run: .github/scripts/next-version_test.sh
