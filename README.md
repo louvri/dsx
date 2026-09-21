@@ -628,7 +628,9 @@ An explicit trailer always wins, and has to be a whole line, so prose that merel
 
 `skip` is read only from the commits a push introduced, unlike the three release levels which are read from every commit since the last tag. Skipping creates no tag, so a skip found anywhere in the range would still be there on the next push and would disable releases permanently. Reading only what was merged makes a skip **defer** rather than suppress: the next release goes out normally and carries the skipped commits with it.
 
-That covers a squash merge and a merge commit. A rebase that leaves the trailer on a commit *below* the tip releases normally and logs why, rather than skipping silently — so put `Release-As: skip` on the commit that lands on `main`. If several commits in the range carry different trailers, the highest level is used.
+That covers a squash merge and a merge commit. A rebase that leaves the trailer on a commit *below* the tip releases normally and logs why, rather than skipping silently — so put `Release-As: skip` on the commit that lands on `main`.
+
+Because it is read per push rather than per commit, a merged branch that mixes a skip with real work skips **all** of it. Nothing is lost — the next release carries those commits — but write the trailer only on a branch that is genuinely not releasable. If several commits in the range carry different trailers, the highest level is used.
 
 ## License
 

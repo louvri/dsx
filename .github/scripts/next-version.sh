@@ -109,10 +109,12 @@ elif grep -qE '^Release-As:[[:space:]]*skip[[:space:]]*$' <<< "$merged"; then
   echo "skip"
   exit 0
 elif grep -qE '^Release-As:[[:space:]]*skip[[:space:]]*$' <<< "$messages"; then
-  # Spelled correctly, just not on what this push introduced - a rebase that
-  # left it below the tip. Saying "the level is wrong" would send the operator
-  # to fix something that is not broken.
-  echo "Release-As: skip found on an earlier commit in the range; it applies only to the commits this push introduced. Releasing normally." >&2
+  # Spelled correctly, just not on what this push introduced. Usually this is
+  # a previous push that deliberately skipped and is now being carried, which
+  # is the common path in this repo - so describe the outcome rather than
+  # implying the operator got something wrong. The range alone cannot tell
+  # that apart from a rebase that left the trailer below the tip.
+  echo "A Release-As: skip earlier in the range does not apply to this push; releasing normally and carrying those commits." >&2
 elif grep -qE '^Release-As:' <<< "$messages"; then
   # Present but unreadable: say so rather than fall through to the commit
   # subject, which would silently produce a different version.
