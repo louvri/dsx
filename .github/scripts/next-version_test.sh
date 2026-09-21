@@ -120,8 +120,25 @@ expect "Release-As tolerates trailing whitespace" v1.0.0
 
 repo p2 v0.0.5; commit "docs: x
 
-  Release-As:   minor  "
-expect "Release-As tolerates surrounding whitespace" v0.1.0
+Release-As:   minor  "
+expect "Release-As tolerates whitespace around the level" v0.1.0
+
+# An indented Release-As: is how a commit body documents the convention. Git
+# does not treat it as a trailer, and neither may we: matching it would let a
+# docs commit cut a release.
+repo p2b v0.0.5; commit "docs: document the release convention
+
+To force a release level, add the trailer on its own line:
+
+    Release-As: major
+
+Otherwise the level comes from the commit subjects."
+expect "an indented Release-As is not a trailer" v0.0.6
+
+repo p2c v0.0.5; commit "docs: x
+
+	Release-As: major"
+expect "a tab-indented Release-As is not a trailer" v0.0.6
 
 repo p3 v0.0.5; commit "feat!: breaking
 

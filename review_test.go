@@ -106,11 +106,17 @@ func TestEmptyOrderAndProjectionFailClosed(t *testing.T) {
 		return aggregationResponse(7), nil
 	}
 
+	// The Datastore client trims before validating, so a whitespace-only field
+	// lands in the same asymmetry as the empty string: dropped by Count, fatal
+	// in Select.
 	tests := map[string]func() *QueryBuilder[testUser]{
-		"order":         func() *QueryBuilder[testUser] { return Query[testUser](db, "User").WithOrder("") },
-		"order desc":    func() *QueryBuilder[testUser] { return Query[testUser](db, "User").WithOrderDesc("") },
-		"projection":    func() *QueryBuilder[testUser] { return Query[testUser](db, "User").WithProject("Name", "") },
-		"no projection": func() *QueryBuilder[testUser] { return Query[testUser](db, "User").WithProject() },
+		"order":            func() *QueryBuilder[testUser] { return Query[testUser](db, "User").WithOrder("") },
+		"order whitespace": func() *QueryBuilder[testUser] { return Query[testUser](db, "User").WithOrder(" ") },
+		"order desc":       func() *QueryBuilder[testUser] { return Query[testUser](db, "User").WithOrderDesc("") },
+		"order desc tab":   func() *QueryBuilder[testUser] { return Query[testUser](db, "User").WithOrderDesc("\t") },
+		"projection":       func() *QueryBuilder[testUser] { return Query[testUser](db, "User").WithProject("Name", "") },
+		"projection space": func() *QueryBuilder[testUser] { return Query[testUser](db, "User").WithProject("Name", "  ") },
+		"no projection":    func() *QueryBuilder[testUser] { return Query[testUser](db, "User").WithProject() },
 	}
 
 	for name, builder := range tests {

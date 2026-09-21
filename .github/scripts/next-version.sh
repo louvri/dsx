@@ -72,14 +72,19 @@ fi
 # An explicit override has to be its own trailer line. Matching a bare
 # marker anywhere in the prose would let a commit that merely
 # *mentions* it cut the wrong release.
+# The trailer must start the line, as git's own trailer parsing requires:
+# an indented Release-As: is how a commit body *documents* the convention, and
+# matching that would let a docs commit cut a release. Whitespace after the
+# colon and at the end of the line is noise the merge UI adds, so it is
+# tolerated.
 level=""
-if grep -qE '^[[:space:]]*Release-As:[[:space:]]*major[[:space:]]*$' <<< "$messages"; then
+if grep -qE '^Release-As:[[:space:]]*major[[:space:]]*$' <<< "$messages"; then
   level="major"
-elif grep -qE '^[[:space:]]*Release-As:[[:space:]]*minor[[:space:]]*$' <<< "$messages"; then
+elif grep -qE '^Release-As:[[:space:]]*minor[[:space:]]*$' <<< "$messages"; then
   level="minor"
-elif grep -qE '^[[:space:]]*Release-As:[[:space:]]*patch[[:space:]]*$' <<< "$messages"; then
+elif grep -qE '^Release-As:[[:space:]]*patch[[:space:]]*$' <<< "$messages"; then
   level="patch"
-elif grep -qE '^[[:space:]]*Release-As:' <<< "$messages"; then
+elif grep -qE '^Release-As:' <<< "$messages"; then
   # Present but unreadable: say so rather than fall through to the commit
   # subject, which would silently produce a different version.
   echo "Release-As: trailer found but its level is not major, minor or patch; ignoring it." >&2

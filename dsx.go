@@ -34,6 +34,7 @@ import (
 	"math"
 	"reflect"
 	"slices"
+	"strings"
 
 	"cloud.google.com/go/datastore"
 	"cloud.google.com/go/datastore/apiv1/datastorepb"
@@ -630,7 +631,7 @@ func (qb *QueryBuilder[T]) WithOffset(offset int) *QueryBuilder[T] {
 //	    WithOrder("Name").
 //	    Select(ctx)
 func (qb *QueryBuilder[T]) WithOrder(field string) *QueryBuilder[T] {
-	if field == "" {
+	if strings.TrimSpace(field) == "" {
 		return qb.fail(fmt.Errorf("dsx: %s: order field must not be empty", qb.kind))
 	}
 	qb.query = qb.query.Order(field)
@@ -649,7 +650,7 @@ func (qb *QueryBuilder[T]) WithOrder(field string) *QueryBuilder[T] {
 //	    WithOrderDesc("CreatedAt").
 //	    Select(ctx)
 func (qb *QueryBuilder[T]) WithOrderDesc(field string) *QueryBuilder[T] {
-	if field == "" {
+	if strings.TrimSpace(field) == "" {
 		return qb.fail(fmt.Errorf("dsx: %s: order field must not be empty", qb.kind))
 	}
 	qb.query = qb.query.Order("-" + field)
@@ -831,7 +832,7 @@ func (qb *QueryBuilder[T]) WithProject(fields ...string) *QueryBuilder[T] {
 	if len(fields) == 0 {
 		return qb.fail(fmt.Errorf("dsx: %s: projection needs at least one field", qb.kind))
 	}
-	if slices.Contains(fields, "") {
+	if slices.ContainsFunc(fields, func(field string) bool { return strings.TrimSpace(field) == "" }) {
 		return qb.fail(fmt.Errorf("dsx: %s: projected field must not be empty", qb.kind))
 	}
 	qb.query = qb.query.Project(fields...)
