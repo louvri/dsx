@@ -160,7 +160,23 @@ expect "skip beats the subject it is attached to" skip
 repo p6 v0.1.0; commit "ci: x
 
 Release-As: skip"; commit "feat!: a real change"
-expect "an explicit level elsewhere in the range still wins over skip" v0.2.0
+expect "a skip below the merged commits does not skip" v0.2.0
+
+# The precedence p6 used to claim, actually exercised: an explicit release
+# level anywhere in the range outranks a skip on the merged commit.
+repo p6c v0.1.0; commit "ci: x
+
+Release-As: patch"; commit "ci: y
+
+Release-As: skip"
+expect "an explicit level in the range outranks a merged skip" v0.1.1
+
+repo p6d v0.1.0; commit "ci: y
+
+Release-As: skip"; commit "ci: x
+
+Release-As: patch"
+expect "and in the other commit order too" v0.1.1
 
 # Skipping creates no tag, so a skip read from anywhere in the range would
 # stay in the range and disable every future release. It must defer, not
@@ -177,6 +193,24 @@ repo p7 v0.1.0; commit "docs: x
 
     Release-As: skip"
 expect "an indented skip is not a trailer" v0.1.1
+
+# A merge commit leaves the trailer on the branch commits, not on HEAD, so
+# reading only HEAD would miss it.
+repo p8a v0.1.0
+git checkout -q -b feature
+commit "ci: reshuffle a workflow
+
+Release-As: skip"
+git checkout -q -
+git merge -q --no-ff -m "Merge pull request #1 from feature" feature
+expect "skip survives a merge commit" skip
+
+# A parentless HEAD has no HEAD^ to diff against; it must not die under set -e.
+repo p8b
+git commit -q --allow-empty --amend -m "ci: first commit
+
+Release-As: skip"
+expect "skip works on a parentless HEAD" skip
 
 # A squash collapses the branch into one commit whose body carries the
 # original messages, trailer included.

@@ -2,8 +2,14 @@
 # Prints the tag for the next release, or "skip" when there is nothing to
 # release. Diagnostics go to stderr so stdout stays machine-readable.
 #
-# The level comes from every commit since the last release tag, so it does not
-# depend on whether a pull request was squashed, merged or rebased. See
+# The release level comes from every commit since the last release tag, so it
+# does not depend on whether a pull request was squashed, merged or rebased.
+#
+# "Release-As: skip" is the exception: it is read only from what the push
+# introduced, because skipping creates no tag and a skip read from the whole
+# range would still be in the range next time, disabling releases for good.
+# That covers a squash and a merge commit; a rebase that leaves the trailer on
+# a commit below the tip releases normally and says so. See
 # next-version_test.sh for the behaviour this must keep.
 set -euo pipefail
 
@@ -49,7 +55,11 @@ fi
 # match on the Release-As trailer below.
 subjects=$(git log "$range" --pretty=%s | tr -d '\r')
 messages=$(git log "$range" --pretty=%B | tr -d '\r')
-tip=$(git log -1 --pretty=%B | tr -d '\r')
+if git rev-parse -q --verify HEAD^ >/dev/null 2>&1; then
+  merged=$(git log HEAD^..HEAD --pretty=%B | tr -d '\r')
+else
+  merged=$(git log -1 --pretty=%B | tr -d '\r')
+fi
 
 # A squash merge collapses the branch into one commit whose body
 # lists the original subjects as "* subject", so read those as
@@ -85,19 +95,24 @@ elif grep -qE '^Release-As:[[:space:]]*minor[[:space:]]*$' <<< "$messages"; then
   level="minor"
 elif grep -qE '^Release-As:[[:space:]]*patch[[:space:]]*$' <<< "$messages"; then
   level="patch"
-elif grep -qE '^Release-As:[[:space:]]*skip[[:space:]]*$' <<< "$tip"; then
+elif grep -qE '^Release-As:[[:space:]]*skip[[:space:]]*$' <<< "$merged"; then
   # Nothing here reaches a consumer - a workflow change, a README edit - so
   # publishing a version identical to the last one would be noise.
   #
-  # Read from the TIP commit only, unlike every other level. Skipping creates
-  # no tag, so a skip found anywhere in the range would still be in the range
-  # on the next push, and every release after it would skip too - one skip
-  # would disable releases permanently. Reading the commit that was just
-  # pushed makes a skip defer rather than suppress: the next push releases
-  # normally and carries the skipped commits with it.
+  # Read from what this push introduced, unlike every other level, which reads
+  # the whole range. Skipping creates no tag, so a skip found anywhere in the
+  # range would still be in the range on the next push, and every release after
+  # it would skip too - one skip would disable releases permanently. Reading
+  # only the merged commits makes a skip defer rather than suppress: the next
+  # push releases normally and carries the skipped commits with it.
   echo "Release-As: skip; nothing to release." >&2
   echo "skip"
   exit 0
+elif grep -qE '^Release-As:[[:space:]]*skip[[:space:]]*$' <<< "$messages"; then
+  # Spelled correctly, just not on what this push introduced - a rebase that
+  # left it below the tip. Saying "the level is wrong" would send the operator
+  # to fix something that is not broken.
+  echo "Release-As: skip found on an earlier commit in the range; it applies only to the commits this push introduced. Releasing normally." >&2
 elif grep -qE '^Release-As:' <<< "$messages"; then
   # Present but unreadable: say so rather than fall through to the commit
   # subject, which would silently produce a different version.
