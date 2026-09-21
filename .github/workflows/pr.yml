@@ -7,6 +7,13 @@ on:
 permissions:
   contents: read
 
+# Superseded runs on the same branch are pointless work. Deliberately not set
+# on release.yml, where cancelling a half-finished tag-and-publish is the last
+# thing you want.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   verify:
     uses: ./.github/workflows/verify.yml
