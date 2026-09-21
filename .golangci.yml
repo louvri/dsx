@@ -22,10 +22,6 @@ linters:
     - unused
     - usestdlibvars
     - wastedassign
-  settings:
-    gosec:
-      excludes:
-        - G115
 
 issues:
   max-issues-per-linter: 0

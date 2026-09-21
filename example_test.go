@@ -237,7 +237,7 @@ func ExampleQueryBuilder_WithNamespace() {
 func ExampleRunInTransaction() {
 	ctx, db := context.Background(), newDB()
 
-	err := dsx.RunInTransaction(ctx, db, func(tx *datastore.Transaction) error {
+	_, err := dsx.RunInTransaction(ctx, db, func(tx *datastore.Transaction) error {
 		key := datastore.NameKey("User", "user-123", nil)
 		key.Namespace = db.Namespace()
 
@@ -252,4 +252,21 @@ func ExampleRunInTransaction() {
 	if err != nil {
 		log.Fatal(err)
 	}
+}
+
+// The returned commit resolves the pending key of an auto-ID insert made
+// inside the transaction.
+func ExampleRunInTransaction_autoID() {
+	ctx, db := context.Background(), newDB()
+
+	var pending *datastore.PendingKey
+	commit, err := dsx.RunInTransaction(ctx, db, func(tx *datastore.Transaction) error {
+		var err error
+		pending, err = tx.Put(datastore.IncompleteKey("User", nil), &User{Name: "Alice"})
+		return err
+	})
+	if err != nil {
+		log.Fatal(err)
+	}
+	fmt.Println(commit.Key(pending).ID)
 }

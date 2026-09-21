@@ -79,6 +79,9 @@ type (
 	// DB represents a connection to a Google Cloud Datastore database.
 	// It wraps the datastore.Client and stores connection metadata, including
 	// the default namespace applied to the keys and queries it creates.
+	//
+	// A DB is safe for concurrent use by multiple goroutines, and is meant to
+	// be created once and shared.
 	DB struct {
 		client     *datastore.Client
 		projectID  string
@@ -96,6 +99,15 @@ type (
 	//
 	// QueryBuilder tracks whether offset or cursor-based pagination is being used
 	// to prevent incompatible combinations.
+	//
+	// Unlike DB, a QueryBuilder is mutable and is NOT safe for concurrent use.
+	// Build one per operation; they are cheap.
+	//
+	// The filters, ordering, projection and pagination on a builder describe a
+	// query, so they apply to the terminals that run one - Select, SelectKeys,
+	// SelectWithCursor, Get, Count and Delete. The write terminals - Upsert,
+	// UpsertMulti, InsertWithAutoKey and InsertMultiWithAutoKey - address
+	// entities by key and ignore them; only the kind and namespace apply.
 	QueryBuilder[T any] struct {
 		db          *DB
 		query       *datastore.Query
@@ -360,12 +372,19 @@ func onlyNoSuchEntity(err error) bool {
 //	    WithFilter("Status", dsx.OpEqual, "active").
 //	    Select(ctx)
 func Query[T any](db *DB, kind string) *QueryBuilder[T] {
-	return &QueryBuilder[T]{
+	qb := &QueryBuilder[T]{
 		db:        db,
 		query:     datastore.NewQuery(kind).Namespace(db.namespace),
 		kind:      kind,
 		namespace: db.namespace,
 	}
+	if kind == "" {
+		// Datastore reads an empty kind as a kindless query, which matches every
+		// entity of every kind. Select and Count would quietly return results
+		// from outside T, and Delete would remove the whole namespace.
+		qb.err = errors.New("dsx: query kind must not be empty")
+	}
+	return qb
 }
 
 // DB returns the database connection associated with this query.
@@ -446,16 +465,21 @@ func (qb *QueryBuilder[T]) resolveKeyRef(ref keyRef) *datastore.Key {
 // the []any that Datastore's value encoding accepts, so that an ordinary
 // []string or []int works rather than only a []any.
 func membershipValues(value any) ([]any, error) {
-	if elements, ok := value.([]any); ok {
-		return elements, nil
+	elements, ok := value.([]any)
+	if !ok {
+		reflected := reflect.ValueOf(value)
+		if !reflected.IsValid() || (reflected.Kind() != reflect.Slice && reflected.Kind() != reflect.Array) {
+			return nil, fmt.Errorf("value must be a slice, got %T", value)
+		}
+		elements = make([]any, reflected.Len())
+		for i := range elements {
+			elements[i] = reflected.Index(i).Interface()
+		}
 	}
-	reflected := reflect.ValueOf(value)
-	if !reflected.IsValid() || (reflected.Kind() != reflect.Slice && reflected.Kind() != reflect.Array) {
-		return nil, fmt.Errorf("value must be a slice, got %T", value)
-	}
-	elements := make([]any, reflected.Len())
-	for i := range elements {
-		elements[i] = reflected.Index(i).Interface()
+	if len(elements) == 0 {
+		// Datastore rejects an empty list, and a filter that can match nothing is
+		// more likely a slice that did not get populated than a deliberate query.
+		return nil, errors.New("value must not be an empty slice")
 	}
 	return elements, nil
 }
@@ -606,6 +630,9 @@ func (qb *QueryBuilder[T]) WithOffset(offset int) *QueryBuilder[T] {
 //	    WithOrder("Name").
 //	    Select(ctx)
 func (qb *QueryBuilder[T]) WithOrder(field string) *QueryBuilder[T] {
+	if field == "" {
+		return qb.fail(fmt.Errorf("dsx: %s: order field must not be empty", qb.kind))
+	}
 	qb.query = qb.query.Order(field)
 	return qb
 }
@@ -622,6 +649,9 @@ func (qb *QueryBuilder[T]) WithOrder(field string) *QueryBuilder[T] {
 //	    WithOrderDesc("CreatedAt").
 //	    Select(ctx)
 func (qb *QueryBuilder[T]) WithOrderDesc(field string) *QueryBuilder[T] {
+	if field == "" {
+		return qb.fail(fmt.Errorf("dsx: %s: order field must not be empty", qb.kind))
+	}
 	qb.query = qb.query.Order("-" + field)
 	return qb
 }
@@ -675,7 +705,9 @@ func (qb *QueryBuilder[T]) WithCursor(cursor string) *QueryBuilder[T] {
 // call returns.
 //
 // OpIn and OpNotIn take any slice - []string, []int, []any - and the elements
-// are converted for you.
+// are converted for you. An empty slice is rejected, since it can match
+// nothing. Datastore additionally caps a membership filter at 30 values, which
+// it enforces itself, so that limit is not duplicated here.
 //
 // Parameters:
 //   - field: Field name to filter on (use FieldKey for entity key)
@@ -796,6 +828,12 @@ func (qb *QueryBuilder[T]) WithAncestorKey(ancestorKey *datastore.Key) *QueryBui
 //	    WithProject("Name", "Email").
 //	    Select(ctx)
 func (qb *QueryBuilder[T]) WithProject(fields ...string) *QueryBuilder[T] {
+	if len(fields) == 0 {
+		return qb.fail(fmt.Errorf("dsx: %s: projection needs at least one field", qb.kind))
+	}
+	if slices.Contains(fields, "") {
+		return qb.fail(fmt.Errorf("dsx: %s: projected field must not be empty", qb.kind))
+	}
 	qb.query = qb.query.Project(fields...)
 	return qb
 }
@@ -995,6 +1033,9 @@ func (qb *QueryBuilder[T]) Get(ctx context.Context) (*T, error) {
 // If an entity with the key exists, it is overwritten; otherwise, a new
 // entity is created.
 //
+// Any filters, ordering or pagination on the builder are ignored: this
+// addresses entities by key, not by query.
+//
 // Parameters:
 //   - ctx: Context for the operation
 //   - key: String key name for the entity
@@ -1024,6 +1065,9 @@ func (qb *QueryBuilder[T]) Upsert(ctx context.Context, key string, data *T) erro
 
 // InsertWithAutoKey inserts a new entity with an auto-generated key and returns the complete key.
 // This always creates a new entity since Datastore assigns a unique key.
+//
+// Any filters, ordering or pagination on the builder are ignored: this
+// addresses entities by key, not by query.
 //
 // Use this when you don't need to control the entity's key but need to know
 // the generated key after insertion (e.g., for returning the key to a client or logging).
@@ -1060,6 +1104,9 @@ func (qb *QueryBuilder[T]) InsertWithAutoKey(ctx context.Context, data *T) (*dat
 
 // UpsertMulti inserts or updates multiple entities, in batches of
 // [maxCommitSize] so that any number of entities can be written at once.
+//
+// Any filters, ordering or pagination on the builder are ignored: this
+// addresses entities by key, not by query.
 //
 // Parameters:
 //   - ctx: Context for the operation
@@ -1117,6 +1164,9 @@ func (qb *QueryBuilder[T]) UpsertMulti(ctx context.Context, items map[string]*T)
 
 // InsertMultiWithAutoKey inserts multiple entities with auto-generated keys,
 // in batches of [maxCommitSize], and returns the complete keys in input order.
+//
+// Any filters, ordering or pagination on the builder are ignored: this
+// addresses entities by key, not by query.
 //
 // Note: each batch is committed independently. If a batch fails, the keys of
 // the batches already committed are returned alongside the error, since those
@@ -1275,6 +1325,9 @@ func DeleteMultiByKey(ctx context.Context, db *DB, kind string, keys []string) e
 // If fn returns nil, the transaction is committed. If fn returns an error,
 // the transaction is rolled back.
 //
+// The returned [datastore.Commit] resolves the pending keys of any auto-ID
+// inserts made inside the transaction; it is nil when the transaction failed.
+//
 // Keys are built by the caller, so a transaction on a namespaced database must
 // set the namespace on the keys it uses; [DB.Namespace] reports the one in
 // effect.
@@ -1284,7 +1337,7 @@ func DeleteMultiByKey(ctx context.Context, db *DB, kind string, keys []string) e
 //
 // Example:
 //
-//	err := dsx.RunInTransaction(ctx, db, func(tx *datastore.Transaction) error {
+//	_, err := dsx.RunInTransaction(ctx, db, func(tx *datastore.Transaction) error {
 //	    var user User
 //	    key := datastore.NameKey("User", "user-123", nil)
 //	    key.Namespace = db.Namespace()
@@ -1295,9 +1348,23 @@ func DeleteMultiByKey(ctx context.Context, db *DB, kind string, keys []string) e
 //	    _, err := tx.Put(key, &user)
 //	    return err
 //	})
-func RunInTransaction(ctx context.Context, db *DB, fn func(tx *datastore.Transaction) error) error {
-	if _, err := db.client.RunInTransaction(ctx, fn); err != nil {
-		return fmt.Errorf("dsx: transaction: %w", err)
+//
+// Resolving an auto-ID insert:
+//
+//	var pending *datastore.PendingKey
+//	commit, err := dsx.RunInTransaction(ctx, db, func(tx *datastore.Transaction) error {
+//	    var err error
+//	    pending, err = tx.Put(datastore.IncompleteKey("Order", nil), &order)
+//	    return err
+//	})
+//	if err != nil {
+//	    return err
+//	}
+//	key := commit.Key(pending)
+func RunInTransaction(ctx context.Context, db *DB, fn func(tx *datastore.Transaction) error) (*datastore.Commit, error) {
+	commit, err := db.client.RunInTransaction(ctx, fn)
+	if err != nil {
+		return nil, fmt.Errorf("dsx: transaction: %w", err)
 	}
-	return nil
+	return commit, nil
 }

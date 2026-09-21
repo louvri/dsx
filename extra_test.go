@@ -59,7 +59,7 @@ func TestSelectWithCursorWrapsServerError(t *testing.T) {
 func TestRunInTransactionCommits(t *testing.T) {
 	db, fake := newTestDB(t)
 
-	err := RunInTransaction(context.Background(), db, func(tx *datastore.Transaction) error {
+	commit, err := RunInTransaction(context.Background(), db, func(tx *datastore.Transaction) error {
 		key := datastore.NameKey("User", "alice", nil)
 		key.Namespace = db.Namespace()
 		_, err := tx.Put(key, &testUser{Name: "alice"})
@@ -67,6 +67,9 @@ func TestRunInTransactionCommits(t *testing.T) {
 	})
 	if err != nil {
 		t.Fatalf("RunInTransaction: %v", err)
+	}
+	if commit == nil {
+		t.Error("commit is nil; it is needed to resolve pending keys")
 	}
 
 	fake.mu.Lock()
@@ -86,9 +89,12 @@ func TestRunInTransactionRollsBackAndWrapsError(t *testing.T) {
 	db, fake := newTestDB(t)
 	sentinel := errors.New("business rule violated")
 
-	err := RunInTransaction(context.Background(), db, func(*datastore.Transaction) error {
+	commit, err := RunInTransaction(context.Background(), db, func(*datastore.Transaction) error {
 		return sentinel
 	})
+	if commit != nil {
+		t.Error("commit is not nil after a failed transaction")
+	}
 	if !errors.Is(err, sentinel) {
 		t.Fatalf("err = %v, want it to wrap the callback error", err)
 	}

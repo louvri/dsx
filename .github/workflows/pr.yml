@@ -32,7 +32,8 @@ jobs:
       - name: Lint
         uses: golangci/golangci-lint-action@v7
         with:
-          version: latest
+          # Pinned: `latest` lets a linter release turn an unrelated PR red.
+          version: v2.13.2
 
       - name: Shellcheck release scripts
         run: shellcheck .github/scripts/*.sh

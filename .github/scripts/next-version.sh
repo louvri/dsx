@@ -73,12 +73,16 @@ fi
 # marker anywhere in the prose would let a commit that merely
 # *mentions* it cut the wrong release.
 level=""
-if grep -qxE 'Release-As: major' <<< "$messages"; then
+if grep -qE '^[[:space:]]*Release-As:[[:space:]]*major[[:space:]]*$' <<< "$messages"; then
   level="major"
-elif grep -qxE 'Release-As: minor' <<< "$messages"; then
+elif grep -qE '^[[:space:]]*Release-As:[[:space:]]*minor[[:space:]]*$' <<< "$messages"; then
   level="minor"
-elif grep -qxE 'Release-As: patch' <<< "$messages"; then
+elif grep -qE '^[[:space:]]*Release-As:[[:space:]]*patch[[:space:]]*$' <<< "$messages"; then
   level="patch"
+elif grep -qE '^[[:space:]]*Release-As:' <<< "$messages"; then
+  # Present but unreadable: say so rather than fall through to the commit
+  # subject, which would silently produce a different version.
+  echo "Release-As: trailer found but its level is not major, minor or patch; ignoring it." >&2
 fi
 
 if [ -z "$level" ]; then

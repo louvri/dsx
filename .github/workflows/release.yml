@@ -5,11 +5,45 @@ on:
     branches: [main]
 
 permissions:
-  contents: write
+  contents: read
 
 jobs:
-  release:
+  # A push to main can bypass the pull request checks, and the tag this
+  # workflow publishes is immutable on proxy.golang.org. Verify first.
+  verify:
     runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      - name: Build
+        run: go build ./...
+
+      - name: Vet
+        run: go vet ./...
+
+      - name: Test
+        run: go test -race ./...
+
+      - name: Lint
+        uses: golangci/golangci-lint-action@v7
+        with:
+          version: v2.13.2
+
+      - name: Shellcheck release scripts
+        run: shellcheck .github/scripts/*.sh
+
+      - name: Test release versioning
+        run: .github/scripts/next-version_test.sh
+
+  release:
+    needs: verify
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
     steps:
       - uses: actions/checkout@v4
         with:

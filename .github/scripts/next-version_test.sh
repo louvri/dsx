@@ -113,6 +113,21 @@ Release-As: minor"
 commit "chore: y"
 expect "Release-As in a non-tip commit still counts" v0.1.0
 
+repo p1 v0.0.5; commit "docs: x
+
+Release-As: major   "
+expect "Release-As tolerates trailing whitespace" v1.0.0
+
+repo p2 v0.0.5; commit "docs: x
+
+  Release-As:   minor  "
+expect "Release-As tolerates surrounding whitespace" v0.1.0
+
+repo p3 v0.0.5; commit "feat!: breaking
+
+Release-As: enormous"
+expect "unreadable Release-As level falls back to the subject" v0.1.0
+
 repo p v0.0.5
 printf 'docs: x\r\n\r\nRelease-As: major\r\n' > "$workdir/crlf.txt"
 git commit -q --allow-empty --cleanup=verbatim -F "$workdir/crlf.txt"

@@ -99,7 +99,7 @@ v0.1.0 is a breaking release. The changes are mechanical and the compiler finds 
 | `dsx.GetByKey[User](db, ctx, ...)` | `dsx.GetByKey[User](ctx, db, ...)` | |
 | `dsx.DeleteByKey(db, ctx, ...)` | `dsx.DeleteByKey(ctx, db, ...)` | |
 | `dsx.DeleteMultiByKey(db, ctx, ...)` | `dsx.DeleteMultiByKey(ctx, db, ...)` | |
-| `dsx.RunInTransaction(db, ctx, fn)` | `dsx.RunInTransaction(ctx, db, fn)` | |
+| `dsx.RunInTransaction(db, ctx, fn)` | `commit, err := dsx.RunInTransaction(ctx, db, fn)` | Context first, and the commit is now returned: it is the only way to resolve the pending key of an auto-ID insert made inside the transaction. |
 | `dsx.Connect(ctx, project, database, credJSON)` | `dsx.Connect(ctx, project, database, dsx.WithCredentialsJSON(credJSON))` | Options leave room for namespaces and client settings without another signature change. |
 | `db.ProjectId()` / `db.DatabaseId()` | `db.ProjectID()` / `db.DatabaseID()` | Go initialisms are capitalised throughout; v0.1.0 is the moment to fix it, since these can never be renamed cheaply again. |
 | `.KeysOnly().Select(ctx)` | `.SelectKeys(ctx)` | `KeysOnly` + `Select` returned zero entities and a nil error: Datastore skips entity loading for a keys-only query, so there was nothing to decode. `SelectKeys` returns the keys instead. |
@@ -111,6 +111,8 @@ These fixes need no migration but change behavior:
 - **`OpNotIn` works at all now.** It was defined as `"not in"` where Datastore spells the operator `"not-in"`, so every `WithFilter(field, dsx.OpNotIn, ...)` failed. If you worked around it, you can drop the workaround.
 - **An unknown `FilterOperator` is now rejected by the builder.** Previously `Count` silently dropped a filter the Datastore client refused and returned a count over more rows than you asked for.
 - **An undecodable cursor is now an error.** It used to be logged and ignored, which silently served page 1. A service that accepts a cursor from a client will now return an error where it previously returned the first page.
+- **An empty kind is rejected.** `dsx.Query[User](db, "")` was a *kindless* query matching every entity of every kind, so `Delete` would have emptied the namespace rather than the kind.
+- **An empty `OpIn` / `OpNotIn` slice, an empty order field and an empty projected field are rejected** instead of being dropped silently by `Count`.
 - **`OpIn` and `OpNotIn` now accept any slice.** `WithFilter("Status", dsx.OpIn, []string{"active", "pending"})` was documented but rejected by Datastore, which only accepts `[]any`. dsx now converts the slice for you.
 - **Batch operations chunk automatically.** `UpsertMulti`, `InsertMultiWithAutoKey` and `GetMulti` previously sent everything in one request and failed above Datastore's limits. Each now splits into requests of 500 (writes) or 1000 (reads).
 
@@ -397,7 +399,7 @@ Projected fields must be indexed; fields tagged `noindex` cannot be projected.
 #### Transactions
 
 ```go
-err := dsx.RunInTransaction(ctx, db, func(tx *datastore.Transaction) error {
+_, err := dsx.RunInTransaction(ctx, db, func(tx *datastore.Transaction) error {
     key := datastore.NameKey("User", "user-123", nil)
     key.Namespace = db.Namespace()
 
@@ -409,6 +411,21 @@ err := dsx.RunInTransaction(ctx, db, func(tx *datastore.Transaction) error {
     _, err := tx.Put(key, &user)
     return err
 })
+```
+
+The returned `*datastore.Commit` resolves the pending key of an auto-ID insert made inside the transaction:
+
+```go
+var pending *datastore.PendingKey
+commit, err := dsx.RunInTransaction(ctx, db, func(tx *datastore.Transaction) error {
+    var err error
+    pending, err = tx.Put(datastore.IncompleteKey("Order", nil), &order)
+    return err
+})
+if err != nil {
+    return err
+}
+key := commit.Key(pending)
 ```
 
 Datastore transactions are limited to 25 entity groups and 270 seconds.
@@ -530,6 +547,14 @@ type User struct {
 }
 ```
 
+## Concurrency
+
+A `DB` is safe for concurrent use and is meant to be created once and shared; `db.WithNamespace` returns a copy that shares the same client.
+
+A `QueryBuilder` is mutable and is **not** safe for concurrent use. Build one per operation - they are cheap.
+
+Filters, ordering, projection and pagination describe a query, so they apply to `Select`, `SelectKeys`, `SelectWithCursor`, `Get`, `Count` and `Delete`. The write terminals - `Upsert`, `UpsertMulti`, `InsertWithAutoKey`, `InsertMultiWithAutoKey` - address entities by key and ignore them; only the kind and namespace apply.
+
 ## Error Handling
 
 dsx does not log. Every error is wrapped with the operation and kind that produced it and returned to the caller, so your own logger reports it once, with your own fields:
@@ -593,7 +618,7 @@ To set the level explicitly, add a `Release-As:` trailer on its own line in the 
 Release-As: minor
 ```
 
-An explicit trailer always wins, and has to be a whole line, so prose that merely mentions a level cannot trigger a release. If several commits in the range carry different trailers, the highest level is used.
+An explicit trailer always wins, and has to be a whole line, so prose that merely mentions a level cannot trigger a release. Surrounding whitespace is fine; a trailer whose level is not one of the three logs a warning and is ignored. If several commits in the range carry different trailers, the highest level is used.
 
 ## License
 
