@@ -81,8 +81,8 @@ type (
 	// the default namespace applied to the keys and queries it creates.
 	DB struct {
 		client     *datastore.Client
-		projectId  string
-		databaseId string
+		projectID  string
+		databaseID string
 		namespace  string
 	}
 
@@ -193,8 +193,8 @@ func WithClientOptions(opts ...option.ClientOption) Option {
 //
 // Parameters:
 //   - ctx: Context for establishing the connection
-//   - projectId: Google Cloud project ID
-//   - databaseId: Datastore database ID (use "" for default database)
+//   - projectID: Google Cloud project ID
+//   - databaseID: Datastore database ID (use "" for default database)
 //   - opts: Optional settings, see [WithCredentialsJSON], [WithNamespace] and
 //     [WithClientOptions]
 //
@@ -209,7 +209,7 @@ func WithClientOptions(opts ...option.ClientOption) Option {
 //	db, err := dsx.Connect(ctx, "my-project", "my-db",
 //	    dsx.WithCredentialsJSON(credJSON),
 //	    dsx.WithNamespace("tenant-42"))
-func Connect(ctx context.Context, projectId, databaseId string, opts ...Option) (*DB, error) {
+func Connect(ctx context.Context, projectID, databaseID string, opts ...Option) (*DB, error) {
 	var cfg connectOptions
 	for _, opt := range opts {
 		if opt != nil {
@@ -222,21 +222,21 @@ func Connect(ctx context.Context, projectId, databaseId string, opts ...Option) 
 		clientOptions = append(clientOptions, option.WithCredentialsJSON([]byte(cfg.credentialsJSON)))
 	}
 
-	client, err := datastore.NewClientWithDatabase(ctx, projectId, databaseId, clientOptions...)
+	client, err := datastore.NewClientWithDatabase(ctx, projectID, databaseID, clientOptions...)
 	if err != nil {
-		return nil, fmt.Errorf("dsx: connect project=%s database=%s: %w", projectId, databaseId, err)
+		return nil, fmt.Errorf("dsx: connect project=%s database=%s: %w", projectID, databaseID, err)
 	}
-	return &DB{client: client, projectId: projectId, databaseId: databaseId, namespace: cfg.namespace}, nil
+	return &DB{client: client, projectID: projectID, databaseID: databaseID, namespace: cfg.namespace}, nil
 }
 
-// ProjectId returns the Google Cloud project ID for this connection.
-func (db *DB) ProjectId() string {
-	return db.projectId
+// ProjectID returns the Google Cloud project ID for this connection.
+func (db *DB) ProjectID() string {
+	return db.projectID
 }
 
-// DatabaseId returns the Datastore database ID for this connection.
-func (db *DB) DatabaseId() string {
-	return db.databaseId
+// DatabaseID returns the Datastore database ID for this connection.
+func (db *DB) DatabaseID() string {
+	return db.databaseID
 }
 
 // Namespace returns the default Datastore namespace for this connection.

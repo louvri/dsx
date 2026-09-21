@@ -113,7 +113,7 @@ func TestDBWithNamespaceIsADerivedCopy(t *testing.T) {
 	if tenant.Client() != db.Client() {
 		t.Error("derived DB does not share the underlying client")
 	}
-	if tenant.ProjectId() != db.ProjectId() || tenant.DatabaseId() != db.DatabaseId() {
+	if tenant.ProjectID() != db.ProjectID() || tenant.DatabaseID() != db.DatabaseID() {
 		t.Error("derived DB lost its project or database")
 	}
 

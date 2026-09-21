@@ -31,7 +31,7 @@ func ExampleConnect() {
 	}
 	defer func() { _ = db.Close() }()
 
-	fmt.Println(db.ProjectId())
+	fmt.Println(db.ProjectID())
 }
 
 func ExampleConnect_options() {

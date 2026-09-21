@@ -101,6 +101,7 @@ v0.1.0 is a breaking release. The changes are mechanical and the compiler finds 
 | `dsx.DeleteMultiByKey(db, ctx, ...)` | `dsx.DeleteMultiByKey(ctx, db, ...)` | |
 | `dsx.RunInTransaction(db, ctx, fn)` | `dsx.RunInTransaction(ctx, db, fn)` | |
 | `dsx.Connect(ctx, project, database, credJSON)` | `dsx.Connect(ctx, project, database, dsx.WithCredentialsJSON(credJSON))` | Options leave room for namespaces and client settings without another signature change. |
+| `db.ProjectId()` / `db.DatabaseId()` | `db.ProjectID()` / `db.DatabaseID()` | Go initialisms are capitalised throughout; v0.1.0 is the moment to fix it, since these can never be renamed cheaply again. |
 | `.KeysOnly().Select(ctx)` | `.SelectKeys(ctx)` | `KeysOnly` + `Select` returned zero entities and a nil error: Datastore skips entity loading for a keys-only query, so there was nothing to decode. `SelectKeys` returns the keys instead. |
 | `dsx.SetLogger(l)`, `dsx.Logger` | *(removed)* | A library should not log. Errors are wrapped with the operation and kind, so the caller logs them once, with its own logger and fields. |
 | `errors.New("query defined to use cursor")` | `dsx.ErrPaginationConflict` | Comparable with `errors.Is`. |
