@@ -266,6 +266,31 @@ func TestWithCredentialsJSONIsRejectedWhenInvalid(t *testing.T) {
 	}
 }
 
+func TestWithCredentialsJSONRejectsOtherCredentialTypes(t *testing.T) {
+	// Well-formed, but not a service account: an externally supplied document
+	// of another type must not be loaded.
+	// The auth library rejects these incomplete documents on its own, so assert
+	// the error is dsx's type check rather than just any error.
+	for _, creds := range []string{`{"type":"authorized_user"}`, `{"type":"external_account"}`, `{}`} {
+		_, err := Connect(context.Background(), testProject, testDatabase, WithCredentialsJSON(creds))
+		if err == nil || !strings.Contains(err.Error(), `want "service_account"`) {
+			t.Errorf("Connect(%s) error = %v, want a service_account type error", creds, err)
+		}
+	}
+}
+
+func TestWithCredentialsJSONPassesServiceAccountToClient(t *testing.T) {
+	// Connect succeeds without credentials, so an incomplete service account
+	// document failing proves it passed the type check and reached the client.
+	_, err := Connect(context.Background(), testProject, testDatabase, WithCredentialsJSON(`{"type":"service_account"}`))
+	if err == nil {
+		t.Fatal("Connect succeeded, want the client to reject the incomplete service account")
+	}
+	if strings.Contains(err.Error(), `want "service_account"`) {
+		t.Errorf("error = %q, want it to come from the client, not the type check", err)
+	}
+}
+
 func TestZeroLimitAndOffsetAreIgnored(t *testing.T) {
 	db, fake := newTestDB(t)
 
