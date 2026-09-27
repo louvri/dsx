@@ -90,6 +90,23 @@ expect "feature is not feat" v1.2.4 "fix: remove the stale feature flag"
 repo k3 v1.2.3; commit "x"
 expect "an identifier containing major is not major" v1.2.4 "fix: rename is_major_version"
 
+repo k4 v1.2.3; commit "x"
+expect "a hyphenated word containing major is not major" v1.2.4 "docs: explain major-version module paths"
+
+repo k5 v1.2.3; commit "x"
+expect "a hyphenated word containing feat is not feat" v1.2.4 "fix: feat-flag parsing"
+
+repo k6 v0.1.0; commit "x"
+expect "major in brackets or parentheses counts" v1.0.0 "Remove Foo (major)"
+
+# --- reverts ----------------------------------------------------------------
+# GitHub titles a revert 'Revert "<original title>"', which quotes the level.
+repo r1 v1.2.3; commit "x"
+expect "a revert of a major title -> patch" v1.2.4 'Revert "major: stable v1"'
+
+repo r2 v1.2.3; commit "x"
+expect "a revert of a feat title -> patch" v1.2.4 'Revert "feat: add an option"'
+
 # --- without a pull request title -------------------------------------------
 # A direct push, or a merge commit whose subject names a feature/ or major-
 # branch, must not choose the level from the commit.
@@ -233,6 +250,13 @@ expect "annotated tags are read" v0.0.7 "fix: x"
 
 repo w v0.0.5
 expect "no commits since the tag -> skip" skip "major: x"
+
+# A re-run for an older commit after a later push released: the newest tag is
+# not an ancestor of HEAD, and "no commits since" would pass silently.
+repo y v1.0.0; commit "feat: the release that failed"
+git checkout -q -b later; commit "fix: released later"; git tag v1.0.1
+git checkout -q -
+expect "a re-run behind a newer release fails loudly" "<script failed>" "feat: the release that failed"
 
 # ----------------------------------------------------------------------------
 cd /

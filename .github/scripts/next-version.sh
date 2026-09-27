@@ -8,6 +8,7 @@
 #
 #   the word "major"  -> major
 #   the word "feat"   -> minor  (feat:, feat(api):, feat!:)
+#   Revert "..."      -> patch, whatever the reverted title said
 #   anything else     -> patch, including a push with no pull request
 #
 # "Release-As: skip" on the merged commits publishes nothing. It is read only
@@ -39,6 +40,13 @@ while IFS= read -r candidate; do
 done <<< "$tags"
 
 if [ -n "$tag" ]; then
+  # The newest tag is not an ancestor when a later push has already released
+  # and this is a re-run for an older commit. Tagging it would publish a
+  # version above one that has changes this commit lacks, so stop instead.
+  if ! git merge-base --is-ancestor "$tag" HEAD; then
+    echo "${tag} is not an ancestor of HEAD: a later push has already released. Carry this change's level in the next pull request's title." >&2
+    exit 1
+  fi
   range="${tag}..HEAD"
 else
   tag="v0.0.0"
@@ -74,10 +82,14 @@ title="${PR_TITLE:-}"
 if [ -z "$title" ]; then
   echo "No pull request title; releasing a patch." >&2
 fi
-# Whole words, so "majority", "is_major" or "feature" cannot choose the level.
-if grep -qiE '(^|[^[:alnum:]_])major([^[:alnum:]_]|$)' <<< "$title"; then
+# Whole words, so "majority", "is_major", "major-version" or "feature" cannot
+# choose the level. GitHub titles a revert 'Revert "<original title>"', which
+# would otherwise re-apply the reverted change's level.
+if grep -qiE '^Revert[[:space:]]+"' <<< "$title"; then
+  level="patch"
+elif grep -qiE '(^|[^[:alnum:]_-])major([^[:alnum:]_-]|$)' <<< "$title"; then
   level="major"
-elif grep -qiE '(^|[^[:alnum:]_])feat([^[:alnum:]_]|$)' <<< "$title"; then
+elif grep -qiE '(^|[^[:alnum:]_-])feat([^[:alnum:]_-]|$)' <<< "$title"; then
   level="minor"
 else
   level="patch"

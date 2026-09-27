@@ -16,6 +16,14 @@ jobs:
   release:
     needs: verify
     runs-on: ubuntu-latest
+    # One release at a time: each run must see the tag the previous one
+    # pushed, or two close merges both compute from the same base tag. Never
+    # cancel a running tag-and-publish. GitHub keeps a single pending run, so
+    # a third merge while one waits supersedes the waiting one; its commits
+    # still ship, at the later title's level.
+    concurrency:
+      group: release
+      cancel-in-progress: false
     permissions:
       contents: write
       pull-requests: read

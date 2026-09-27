@@ -127,7 +127,7 @@ db, err := dsx.Connect(ctx, "project-id", "")
 // Using a specific database
 db, err := dsx.Connect(ctx, "project-id", "database-id")
 
-// Using explicit credentials JSON
+// Using a service account key
 db, err := dsx.Connect(ctx, "project-id", "", dsx.WithCredentialsJSON(credentialsJSON))
 
 // Scoped to a namespace, with an extra client option
@@ -138,6 +138,8 @@ db, err := dsx.Connect(ctx, "project-id", "",
 // Always close when done
 defer db.Close()
 ```
+
+`WithCredentialsJSON` accepts only a service account key (`"type": "service_account"`); `Connect` fails on any other credential type, such as `authorized_user` or `external_account`. Pass those through `WithClientOptions` instead - dsx does not check their type there, so validate a document from an external source first.
 
 ### Namespaces
 
@@ -608,11 +610,11 @@ Merging a pull request into `main` tags a release automatically. The level comes
 | contains the word `feat` | minor | `feat(query): add WithProjection` |
 | anything else | patch | `fix: close the iterator on error` |
 
-`major` wins when a title has both. Only whole words count, so "majority", "is_major" or "feature" stay a patch - but any `major` does count, including in prose such as "fix: major memory leak", so keep the word out of titles that are not a major release. A breaking-change marker (`feat!:`, `BREAKING CHANGE:`) does not raise the level on its own. A push straight to `main`, with no pull request, releases a patch.
+`major` wins when a title has both. Only whole words count - letters, digits, `_` and `-` all belong to the word - so "majority", "is_major", "major-version" or "feature" stay a patch. Any other `major` does count, including in prose such as "fix: major memory leak", so keep the word out of titles that are not a major release. GitHub's revert titles (`Revert "…"`) are always a patch, whatever they quote. A breaking-change marker (`feat!:`, `BREAKING CHANGE:`) does not raise the level on its own. A push straight to `main`, with no pull request, releases a patch.
 
 Go ties the major version to the module path: v2 and later need a path ending in `/vN`, v0 and v1 a path without one. A release whose version disagrees with `go.mod` is refused, since the tag could be neither installed nor withdrawn. Change the module path in the same pull request as the `major` title - a re-run cannot rescue a refused release, and a later pull request releases at its own title's level.
 
-The level is read from the title of the pull request being released, and only that one. If a release is skipped or fails, the next release does not inherit the missed pull request's level - re-run the failed release job instead.
+The level is read from the title of the pull request being released, and only that one. If a release is skipped or fails, the next release does not inherit the missed pull request's level. Re-running a failed release job works only until the next pull request merges: once a later push has released, the re-run fails rather than tag an older commit, and the missed level has to go in the next pull request's title. Releases run one at a time, so two merges close together are tagged in order.
 
 A change that reaches no consumer - a workflow, a README - can skip the release entirely with a trailer on its own line in the merged commit message:
 
