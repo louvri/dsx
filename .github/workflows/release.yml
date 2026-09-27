@@ -18,15 +18,33 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: write
+      pull-requests: read
     steps:
       - uses: actions/checkout@v7
         with:
           fetch-depth: 0
 
+      # The level comes from the title of the pull request this push merged.
+      # It is looked up rather than read from the commit because a squash of a
+      # single-commit pull request takes that commit's subject, not the title.
+      # The title stays in an environment variable: it is contributor-written
+      # text and must never be interpolated into the script.
       - name: Determine next version
         id: version
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -euo pipefail
+          PR_TITLE=$(gh api "repos/${GITHUB_REPOSITORY}/commits/${GITHUB_SHA}/pulls" \
+            --jq "map(select(.merge_commit_sha == \"${GITHUB_SHA}\")) | first | .title // \"\"")
+          # A squash commit ends in "(#N)". If it names a pull request the
+          # lookup did not find, releasing a patch could be the wrong level,
+          # and a tag cannot be withdrawn - fail so a re-run can retry.
+          if [ -z "$PR_TITLE" ] && [[ "$(git log -1 --pretty=%s)" =~ \(#[0-9]+\)$ ]]; then
+            echo "::error::HEAD names a pull request, but none is linked to ${GITHUB_SHA} yet; re-run this job."
+            exit 1
+          fi
+          export PR_TITLE
           next=$(.github/scripts/next-version.sh)
           if [ "$next" = "skip" ]; then
             echo "skip=true" >> "$GITHUB_OUTPUT"
