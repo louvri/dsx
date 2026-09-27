@@ -127,7 +127,7 @@ db, err := dsx.Connect(ctx, "project-id", "")
 // Using a specific database
 db, err := dsx.Connect(ctx, "project-id", "database-id")
 
-// Using explicit credentials JSON
+// Using a service account key
 db, err := dsx.Connect(ctx, "project-id", "", dsx.WithCredentialsJSON(credentialsJSON))
 
 // Scoped to a namespace, with an extra client option
@@ -138,6 +138,8 @@ db, err := dsx.Connect(ctx, "project-id", "",
 // Always close when done
 defer db.Close()
 ```
+
+`WithCredentialsJSON` accepts only a service account key (`"type": "service_account"`); `Connect` fails on any other credential type, such as `authorized_user` or `external_account`. Pass those through `WithClientOptions` instead - dsx does not check their type there, so validate a document from an external source first.
 
 ### Namespaces
 
@@ -600,37 +602,29 @@ users, err := dsx.Query[User](db, "User").
 
 ## Releasing
 
-Pushing to `main` tags a release automatically. The bump level is read from every commit since the last release tag, so it does not matter whether a pull request is squashed, merged or rebased. Write the subject as a [conventional commit](https://www.conventionalcommits.org/):
+Merging a pull request into `main` tags a release automatically. The level comes from the pull request title, ignoring case:
 
-| Commit | Below v1.0.0 | v1.0.0 and above |
+| Title | Release | Example |
 | --- | --- | --- |
-| any type with `!` (`feat!:`, `fix!:`, `refactor(api)!:`), or a `BREAKING CHANGE:` / `BREAKING-CHANGE:` line in the body | minor | major |
-| `feat:` / `feat(scope):` | patch | minor |
-| anything else (`fix:`, `docs:`, `chore:`, ...) | patch | patch |
+| contains the word `major` | major | `major: remove the deprecated Connect signature` |
+| contains the word `feat` | minor | `feat(query): add WithProjection` |
+| anything else | patch | `fix: close the iterator on error` |
 
-When a pull request is squashed, the generated body lists the original commit subjects as `* subject` lines, and those count as subjects too - so a squash keeps the right level even if its title is not a conventional commit.
+`major` wins when a title has both. Only whole words count - letters, digits, `_` and `-` all belong to the word - so "majority", "is_major", "major-version" or "feature" stay a patch. Any other `major` does count, including in prose such as "fix: major memory leak", so keep the word out of titles that are not a major release. GitHub's revert titles (`Revert "…"`) are always a patch, whatever they quote. A breaking-change marker (`feat!:`, `BREAKING CHANGE:`) does not raise the level on its own. A push straight to `main`, with no pull request, releases a patch.
 
-Below v1.0.0, semver keeps breaking changes in the minor position, which is why this release is v0.1.0 rather than v1.0.0.
+Go ties the major version to the module path: v2 and later need a path ending in `/vN`, v0 and v1 a path without one. A release whose version disagrees with `go.mod` is refused, since the tag could be neither installed nor withdrawn. Change the module path in the same pull request as the `major` title - a re-run cannot rescue a refused release, and a later pull request releases at its own title's level.
 
-To set the level explicitly, add a `Release-As:` trailer on its own line in the commit message:
+The level is read from the title of the pull request being released, and only that one. If a release is skipped or fails, the next release does not inherit the missed pull request's level. Re-running a failed release job works only until the next pull request merges: once a later push has released, the re-run fails rather than tag an older commit, and the missed level has to go in the next pull request's title. Releases run one at a time, so two merges close together are tagged in order.
 
-```
-Release-As: minor
-```
-
-A change that reaches no consumer - a workflow, a README - can skip the release entirely:
+A change that reaches no consumer - a workflow, a README - can skip the release entirely with a trailer on its own line in the merged commit message:
 
 ```
 Release-As: skip
 ```
 
-An explicit trailer always wins, and has to be a whole line, so prose that merely mentions a level cannot trigger a release. Surrounding whitespace is fine; a trailer whose level is not one of the four logs a warning and is ignored.
+The trailer has to be a whole line, so prose that merely mentions it cannot skip a release. Surrounding whitespace is fine.
 
-`skip` is read only from the commits a push introduced, unlike the three release levels which are read from every commit since the last tag. Skipping creates no tag, so a skip found anywhere in the range would still be there on the next push and would disable releases permanently. Reading only what was merged makes a skip **defer** rather than suppress: the next release goes out normally and carries the skipped commits with it.
-
-That covers a squash merge and a merge commit. A rebase that leaves the trailer on a commit *below* the tip releases normally and logs why, rather than skipping silently — so put `Release-As: skip` on the commit that lands on `main`.
-
-Because it is read per push rather than per commit, a merged branch that mixes a skip with real work skips **all** of it. Nothing is lost — the next release carries those commits — but write the trailer only on a branch that is genuinely not releasable. If several commits in the range carry different trailers, the highest level is used.
+Skipping creates no tag, so a skip **defers** rather than suppresses: the next release goes out normally and carries the skipped commits with it. For the same reason, `skip` is read only from the commits a push introduced, never from the whole range since the last tag - otherwise one skip would stay in range and disable releases permanently. A merged branch that mixes a skip with real work skips all of it, so write the trailer only on a branch that is genuinely not releasable.
 
 ## License
 

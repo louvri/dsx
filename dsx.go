@@ -29,6 +29,7 @@ package dsx
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"math"
@@ -181,6 +182,13 @@ const (
 
 // WithCredentialsJSON authenticates using an explicit service account
 // credentials document rather than the ambient default credentials.
+//
+// Only a document of type "service_account" is accepted; [Connect] fails on
+// any other type. Other credential types can still be passed through
+// [WithClientOptions], but dsx does not check them there, and neither does
+// the Datastore transport check the type given to
+// option.WithAuthCredentialsJSON: validate a document from an external source
+// before passing it that way.
 func WithCredentialsJSON(credentialsJSON string) Option {
 	return func(o *connectOptions) { o.credentialsJSON = credentialsJSON }
 }
@@ -230,16 +238,41 @@ func Connect(ctx context.Context, projectID, databaseID string, opts ...Option) 
 		}
 	}
 
-	clientOptions := cfg.clientOptions
-	if cfg.credentialsJSON != "" {
-		clientOptions = append(clientOptions, option.WithCredentialsJSON([]byte(cfg.credentialsJSON)))
-	}
-
-	client, err := datastore.NewClientWithDatabase(ctx, projectID, databaseID, clientOptions...)
+	client, err := newClient(ctx, projectID, databaseID, cfg)
 	if err != nil {
 		return nil, fmt.Errorf("dsx: connect project=%s database=%s: %w", projectID, databaseID, err)
 	}
 	return &DB{client: client, projectID: projectID, databaseID: databaseID, namespace: cfg.namespace}, nil
+}
+
+func newClient(ctx context.Context, projectID, databaseID string, cfg connectOptions) (*datastore.Client, error) {
+	clientOptions := cfg.clientOptions
+	if cfg.credentialsJSON != "" {
+		credentials, err := serviceAccountCredentials(cfg.credentialsJSON)
+		if err != nil {
+			return nil, err
+		}
+		clientOptions = append(clientOptions, credentials)
+	}
+	return datastore.NewClientWithDatabase(ctx, projectID, databaseID, clientOptions...)
+}
+
+// serviceAccountCredentials returns the client option for a service account
+// credentials document, rejecting any other credential type.
+//
+// option.WithAuthCredentialsJSON records the expected type, but the gRPC
+// transport Datastore uses does not enforce it, so it is checked here.
+func serviceAccountCredentials(credentialsJSON string) (option.ClientOption, error) {
+	var doc struct {
+		Type string `json:"type"`
+	}
+	if err := json.Unmarshal([]byte(credentialsJSON), &doc); err != nil {
+		return nil, fmt.Errorf("parse credentials: %w", err)
+	}
+	if doc.Type != string(option.ServiceAccount) {
+		return nil, fmt.Errorf("credentials type %q, want %q", doc.Type, option.ServiceAccount)
+	}
+	return option.WithAuthCredentialsJSON(option.ServiceAccount, []byte(credentialsJSON)), nil
 }
 
 // ProjectID returns the Google Cloud project ID for this connection.

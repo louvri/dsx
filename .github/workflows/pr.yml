@@ -7,9 +7,9 @@ on:
 permissions:
   contents: read
 
-# Superseded runs on the same branch are pointless work. Deliberately not set
-# on release.yml, where cancelling a half-finished tag-and-publish is the last
-# thing you want.
+# Superseded runs on the same branch are pointless work. release.yml queues
+# instead, where cancelling a half-finished tag-and-publish is the last thing
+# you want.
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
